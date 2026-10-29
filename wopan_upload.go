@@ -37,6 +37,12 @@ type wopanUploadSession struct {
 	authLock                                                  contextMutex
 	refreshAuth                                               func(context.Context) (string, string, error)
 	lastAuthRefresh                                           time.Time
+	batch                                                     string
+}
+
+type wopanCheckpointSession struct {
+	Kind, Unique, Endpoint, Batch string
+	PartSize                      int64
 }
 
 func uploadConcurrency(n int) int {
@@ -68,7 +74,14 @@ func (d *wopanDAVDrive) prepareUpload(ctx context.Context, parent, name string, 
 		return nil, err
 	}
 	access, _ := d.w.GetToken()
-	info := wopan.Json{"spaceType": wopan.SpaceTypePersonal, "directoryId": parent, "batchNo": time.Now().Format("20060102150405"), "fileName": name, "fileSize": size, "fileType": d.w.GetFileType(name)}
+	batch := time.Now().Format("20060102150405")
+	var saved wopanCheckpointSession
+	if exists, err := checkpointFrom(ctx).session(&saved); err != nil {
+		return nil, err
+	} else if exists {
+		batch = saved.Batch
+	}
+	info := wopan.Json{"spaceType": wopan.SpaceTypePersonal, "directoryId": parent, "batchNo": batch, "fileName": name, "fileSize": size, "fileType": d.w.GetFileType(name)}
 	encrypted, err := d.w.EncryptParam(wopan.ChannelWoHome, info)
 	if err != nil {
 		return nil, err
@@ -78,6 +91,7 @@ func (d *wopanDAVDrive) prepareUpload(ctx context.Context, parent, name string, 
 		partMiB = 5
 	}
 	u := &wopanUploadSession{endpoint: endpoint, access: access, name: name, parent: parent, encrypted: encrypted, size: size, partSize: int64(partMiB) << 20, unique: strconv.FormatInt(time.Now().UnixMilli(), 10) + "_" + randomKey()[:10], source: d.source(), concurrency: uploadConcurrency(d.uploadConcurrency), slots: d.uploadSlots, mode: uploadMode(d.uploadMode), budget: d.uploadBudget}
+	u.batch = batch
 	if runtime := transfersFrom(ctx); runtime != nil {
 		u.recovery = runtime.recovery
 	}
@@ -127,6 +141,18 @@ func (d *wopanDAVDrive) uploadParts(ctx context.Context, parent, name string, f 
 
 func (u *wopanUploadSession) run(ctx context.Context, f io.ReaderAt) (string, error) {
 	started := time.Now()
+	cp := checkpointFrom(ctx)
+	var saved wopanCheckpointSession
+	if exists, err := cp.session(&saved); err != nil {
+		return "", err
+	} else if exists {
+		if saved.Kind != "wopan" || saved.Unique == "" || saved.PartSize <= 0 || validDownloadURL(saved.Endpoint) != nil {
+			return "", errors.New("联通续传会话无效")
+		}
+		u.unique, u.endpoint, u.partSize = saved.Unique, saved.Endpoint, saved.PartSize
+	} else if err := cp.setSession(wopanCheckpointSession{"wopan", u.unique, u.endpoint, u.batch, u.partSize}); err != nil {
+		return "", err
+	}
 	if u.partSize <= 0 || u.size < 0 {
 		return "", errors.New("上传大小或分片大小无效")
 	}
@@ -163,7 +189,15 @@ func (u *wopanUploadSession) run(ctx context.Context, f io.ReaderAt) (string, er
 				if index > parts || workerCtx.Err() != nil {
 					return
 				}
-				value, err := u.part(workerCtx, f, index, parts, workerID, pool, &sent, &confirmed, &retries)
+				value, reused := cp.part(index)
+				var err error
+				if reused {
+					n := min(u.partSize, u.size-(index-1)*u.partSize)
+					confirmed.Add(n)
+					checkpointProgress(workerCtx, n, index)
+				} else {
+					value, err = u.part(workerCtx, f, index, parts, workerID, pool, &sent, &confirmed, &retries)
+				}
 				mu.Lock()
 				if err != nil && firstErr == nil {
 					firstErr = err
@@ -329,6 +363,9 @@ func (u *wopanUploadSession) part(ctx context.Context, f io.ReaderAt, index, par
 			err = errors.New("上传节点提前返回，分片正文未被完整读取，不能当作已确认")
 		}
 		if err == nil {
+			if saveErr := checkpointFrom(ctx).confirm(index, result.Data.Fid); saveErr != nil {
+				return "", fmt.Errorf("云端分片已确认但续传记录未保存：%w", saveErr)
+			}
 			confirmed.Add(n)
 			if u.recovery != nil {
 				u.recovery.confirmed.Add(n)

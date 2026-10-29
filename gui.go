@@ -419,6 +419,10 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, 200, g.publicStatus())
 		return
 	}
+	if r.URL.Path == "/api/upload-resume" {
+		g.checkpointAPI(w, r)
+		return
+	}
 	if (r.URL.Path == "/api/run-log" || r.URL.Path == "/api/run-log/export") && r.Method == "GET" {
 		g.runLogAPI(w, r)
 		return

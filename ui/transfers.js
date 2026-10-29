@@ -17,7 +17,7 @@ const transferFields = [
   ['upload_prefetch_mib','提前接收目标（MiB）',10,1,1024,1,'memory-fields']
 ];
 const transferModes = [
-  ['upload_storage_mode','上传缓存方式','memory',[['memory','严格纯内存（联通 / 夸克）'],['auto','内存优先 · 准备阶段不兼容时使用磁盘'],['disk','磁盘兼容（移动 / 开放平台 / 备用）']],'memory-fields'],
+  ['upload_storage_mode','上传缓存方式','memory',[['memory','严格纯内存（联通 / 夸克）'],['auto','内存优先 · 准备阶段不兼容时使用磁盘'],['disk','磁盘兼容 · 支持云端重启续传']],'memory-fields'],
   ['upload_recovery_mode','总体低速恢复','auto',[['auto','启用 · 所有上传统一暂停'],['off','关闭 · 保留故障重试']],'recovery-fields']
 ];
 function paintTransfers(d) {
@@ -128,3 +128,29 @@ function openListPayload(account) {
   const r = backupRows.get(account); if (!r) return null;
   return {enabled:r.enabled.checked,address:r.address.value.trim(),root:r.root.value.trim(),token:r.token.value,meta_password:r.meta_password.value,verify_write:r.verify_write.checked};
 }
+
+async function refreshUploadResume() {
+  const host = $('resume-tasks');
+  try {
+    const data = await api('upload-resume', null, 'GET');
+    host.replaceChildren();
+    for (const task of data.tasks || []) {
+      const row = document.createElement('div'), text = document.createElement('p');
+      text.textContent = (task.target || task.id) + ' · ' + task.state + ' · 云端已确认 ' + bytes(task.confirmed || 0) + ' / ' + bytes(task.size || 0);
+      row.append(text);
+      for (const [action,label] of [[task.paused ? 'resume' : 'pause',task.paused ? '继续' : '暂停'],['reset','放弃续传并重传']]) {
+        const button = document.createElement('button'); button.className = 'small'; button.textContent = label;
+        button.onclick = async () => {
+          if (action === 'reset' && !confirm('删除该任务的续传记录？下次将重新上传公网正文，已有云端临时文件不会自动删除。')) return;
+          button.disabled = true;
+          try { await api('upload-resume',{id:task.id,action}); await refreshUploadResume(); }
+          catch (e) { notice(e.message); button.disabled = false; }
+        };
+        row.append(button);
+      }
+      host.append(row);
+    }
+    if (!host.childNodes.length) host.textContent = '没有待恢复的云端上传任务。';
+  } catch (e) { host.textContent = '读取续传任务失败：' + e.message; }
+}
+$('resume-refresh').onclick = refreshUploadResume;

@@ -15,7 +15,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	wopan "github.com/OpenListTeam/wopan-sdk-go"
@@ -909,11 +908,27 @@ func (d *mobileDAVDrive) Upload(ctx context.Context, parent, name string, f *os.
 	}
 	size := strconv.FormatInt(fi.Size(), 10)
 	body := `<pcUploadFileRequest><totalSize>` + size + `</totalSize><uploadContentList length="1"><uploadContentInfo><contentName>` + xmlEscape(name) + `</contentName><contentSize>` + size + `</contentSize><digest>` + strings.ToUpper(fmt.Sprintf("%x", h.Sum(nil))) + `</digest></uploadContentInfo></uploadContentList><parentCatalogID>` + xmlEscape(parent) + `</parentCatalogID><operation>0</operation></pcUploadFileRequest>`
-	m, e := d.command(ctx, "pcUploadFileRequest", body)
+	cp := checkpointFrom(ctx)
+	var saved mobileCheckpointSession
+	exists, e := cp.session(&saved)
 	if e != nil {
 		return davEntry{}, e
 	}
-	r := object(m["uploadResult"])
+	if exists && (saved.Kind != "mobile" || saved.PartSize < 1) {
+		return davEntry{}, errors.New("移动续传会话无效")
+	}
+	if !exists {
+		m, e := d.command(ctx, "pcUploadFileRequest", body)
+		if e != nil {
+			return davEntry{}, e
+		}
+		partSize := int64(5 << 20)
+		if d.partMiB >= 5 && d.partMiB <= 16 {
+			partSize = int64(d.partMiB) << 20
+		}
+		saved = mobileCheckpointSession{Kind: "mobile", Result: object(m["uploadResult"]), PartSize: partSize}
+	}
+	r := saved.Result
 	entries := list(object(r["newContentIDList"])["newContent"])
 	if len(entries) != 1 {
 		return davEntry{}, errors.New("移动上传第一阶段未返回唯一的文件信息")
@@ -927,27 +942,18 @@ func (d *mobileDAVDrive) Upload(ctx context.Context, parent, name string, f *os.
 	if need != "0" && need != "1" && need != "2" {
 		return davEntry{}, errors.New("移动上传未返回有效 isNeedUpload 标记")
 	}
+	if !exists {
+		if e = cp.setSession(saved); e != nil {
+			return davEntry{}, e
+		}
+	}
 	if need == "1" {
 		u, task := valueString(r["redirectionUrl"]), valueString(r["uploadTaskID"])
 		if e = validDownloadURL(u); e != nil || task == "" {
 			return davEntry{}, errors.New("移动上传地址或任务 ID 无效")
 		}
-		hc := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-		var sent, confirmed atomic.Int64
-		partSize := int64(5 << 20)
-		if d.partMiB >= 5 && d.partMiB <= 16 {
-			partSize = int64(d.partMiB) << 20
-		}
-		for off := int64(0); off < fi.Size() || off == 0; {
-			n := min(partSize, fi.Size()-off)
-			last := off+n == fi.Size()
-			if e = d.sendUploadPart(ctx, hc, u, task, name, fi.Size(), off, n, max(int64(1), (fi.Size()+partSize-1)/partSize), off/partSize+1, last, f, &sent, &confirmed); e != nil {
-				return davEntry{}, e
-			}
-			off += n
-			if last {
-				break
-			}
+		if e = d.uploadResumableParts(ctx, u, task, name, fi.Size(), saved.PartSize, f); e != nil {
+			return davEntry{}, e
 		}
 	}
 	for attempt := 0; attempt < 5; attempt++ {

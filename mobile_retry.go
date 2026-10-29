@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+type mobileCheckpointSession struct {
+	Kind     string
+	Result   map[string]any
+	PartSize int64
+}
+
 func (d *mobileDAVDrive) sendUploadPart(ctx context.Context, hc *http.Client, endpoint, task, name string, size, off, n, parts, index int64, last bool, f io.ReaderAt, sent, confirmed *atomic.Int64) error {
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -102,4 +108,33 @@ func (d *mobileDAVDrive) sendUploadPart(ctx context.Context, hc *http.Client, en
 			return err
 		}
 	}
+}
+
+func (d *mobileDAVDrive) uploadResumableParts(ctx context.Context, u, task, name string, size, partSize int64, f io.ReaderAt) error {
+	cp := checkpointFrom(ctx)
+	var e error
+	hc := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	var sent, confirmed atomic.Int64
+
+	for off := int64(0); off < size || off == 0; {
+		n := min(partSize, size-off)
+		last := off+n == size
+		index := off/partSize + 1
+		if _, reused := cp.part(index); reused {
+			confirmed.Add(n)
+			checkpointProgress(ctx, n, index)
+		} else {
+			if e = d.sendUploadPart(ctx, hc, u, task, name, size, off, n, max(int64(1), (size+partSize-1)/partSize), index, last, f, &sent, &confirmed); e != nil {
+				return e
+			}
+			if e = cp.confirm(index, ""); e != nil {
+				return e
+			}
+		}
+		off += n
+		if last {
+			break
+		}
+	}
+	return nil
 }

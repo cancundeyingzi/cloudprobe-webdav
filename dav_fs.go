@@ -628,15 +628,25 @@ func (d *davFile) Close() (err error) {
 	if e := d.checkUploadTarget(d.original); e != nil {
 		return e
 	}
-	// Stage under a unique cloud name. An interrupted upload cannot truncate the original.
-	stageName := "CloudProbe-upload-" + randomKey()[:12] + path.Ext(d.node.entry.Name)
-	logDAV(d.ctx, runLogEntry{Operation: "上传名称映射", Source: "本机", Result: "准备", Detail: d.node.entry.Name + " → 云端临时名称 " + stageName})
-	created, e := m.drive.Upload(d.ctx, d.node.parent, stageName, d.tmp)
+	cp, releaseCheckpoint, e := d.openCheckpoint()
+	if e != nil {
+		return davCloudError(d.ctx, e)
+	}
+	defer releaseCheckpoint()
+	created, e := d.uploadWithCheckpoint(cp)
 	f.invalidate(m)
 	if e != nil {
 		return davCloudError(d.ctx, e)
 	}
-	return d.commitUpload(created, fiSize(d.tmp), d.original)
+	if d.committed == nil {
+		err = d.commitUpload(created, fiSize(d.tmp), d.original)
+	}
+	if err == nil && cp != nil {
+		if cleanup := os.Remove(cp.file); cleanup != nil && !os.IsNotExist(cleanup) {
+			logDAV(d.ctx, runLogEntry{Operation: "清理续传记录", Source: "本机", Result: "待清理", Error: cleanup.Error()})
+		}
+	}
+	return err
 }
 
 func fiSize(f *os.File) int64 {
@@ -662,6 +672,15 @@ func (d *davFile) commitUpload(created davEntry, size int64, old *davEntry) (err
 	defer func() { commit(err) }()
 	if old != nil {
 		backupName = "CloudProbe-backup-" + randomKey()[:12] + path.Ext(old.Name)
+		if cp := checkpointFrom(d.ctx); cp != nil {
+			cp.mu.Lock()
+			cp.data.Backup = backupName
+			e = cp.saveLocked()
+			cp.mu.Unlock()
+			if e != nil {
+				return e
+			}
+		}
 		if e = m.drive.Move(d.ctx, *old, "", backupName); e != nil {
 			if checkErr := d.confirmBackupRename(*old, backupName); checkErr != nil {
 				return davCloudError(d.ctx, fmt.Errorf("原文件备份响应失败；保留现有名称和内容以待核对：%v；%w", checkErr, e))
@@ -678,6 +697,16 @@ func (d *davFile) commitUpload(created davEntry, size int64, old *davEntry) (err
 			return davCloudError(d.ctx, fmt.Errorf("写入确认失败；旧内容保留于 %s：%w", backupName, e))
 		}
 		return e
+	}
+	if cp := checkpointFrom(d.ctx); cp != nil {
+		cp.mu.Lock()
+		cp.data.Uploaded = d.committed
+		cp.data.UploadedVersion = d.committed.ContentVersion
+		e = cp.saveLocked()
+		cp.mu.Unlock()
+		if e != nil {
+			return davCloudError(d.ctx, e)
+		}
 	}
 	if old != nil {
 		if e = m.drive.Remove(d.ctx, *old); e != nil {

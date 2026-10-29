@@ -20,6 +20,12 @@ func readQuarkOSSCompletion(response *http.Response, reader io.Reader) error {
 		return errors.New("夸克合并响应超过 1 MiB，结果待核验")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var failure struct {
+			Code string `xml:"Code"`
+		}
+		if xml.Unmarshal(body, &failure) == nil && failure.Code == "NoSuchUpload" {
+			return &quarkPartError{HTTP: &upstreamHTTPError{code: response.StatusCode, source: "夸克 OSS 完成请求"}, Code: failure.Code, Detail: "（NoSuchUpload）"}
+		}
 		return &upstreamHTTPError{code: response.StatusCode, after: retryAfterHeader(response.Header), source: "夸克 OSS 完成请求"}
 	}
 	body = bytes.TrimSpace(bytes.TrimPrefix(body, []byte{0xef, 0xbb, 0xbf}))
