@@ -48,6 +48,9 @@ document.querySelectorAll('[data-log-tab]').forEach(button => {
 $('go-files').onclick = () => tab('files');
 try { tab(sessionStorage.getItem('cloudprobe-page-' + location.port) || 'login'); } catch { tab('login'); }
 function paintConsoleStatus(s) {
+	const pending = Number(s.credential_save_pending || 0), warning = $('credential-save-warning');
+	warning.classList.toggle('hidden',pending === 0);
+	warning.textContent = pending ? '有 ' + pending + ' 个账号的新授权尚未保存。' + (s.credential_save_error || '正在重试保存。') : '';
   const d = s.webdav || {}, running = !!d.running;
   $('account-dot').classList.toggle('ready',!!(s.has_accounts || s.logged_in));
   $('global-login').textContent = s.has_accounts || s.logged_in ? '云盘账号可用' : '账号未登录';

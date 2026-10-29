@@ -5,7 +5,6 @@ import (
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -232,7 +231,11 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	}
 	g.mu.Lock()
 	logged := g.logged
+	resourceErr := validateDAVMountResources(in.Mounts, g.accounts)
 	g.mu.Unlock()
+	if resourceErr != nil {
+		return nil, resourceErr
+	}
 	if !logged && !g.quark.loggedClients() {
 		return nil, errors.New("请先登录爆米花并读取绑定云盘，或添加独立夸克账号")
 	}
@@ -351,7 +354,7 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 				return nil, errors.New(g.redactDAV(checkErr.Error()))
 			}
 			savedMount.OpenListEnabled, savedMount.OpenListAddress, savedMount.OpenListRoot = true, backup.cfg.Address, backup.cfg.Root
-			m.WriteStatus += "；OpenList 同目录备用已核验"
+			m.WriteStatus += "；OpenList 仅作目录和下载备用，写入使用原生接口"
 		} else if sel.OpenList != nil && !sel.OpenList.Enabled {
 			if e = g.saveOpenList(backupKey, openListSaved{Identity: m.Identity}); e != nil {
 				return nil, e
@@ -437,6 +440,9 @@ func writePrivateBytes(file string, b []byte) error {
 	if e = tmp.Chmod(0600); e == nil {
 		_, e = tmp.Write(b)
 	}
+	if e == nil {
+		e = tmp.Sync()
+	}
 	ce := tmp.Close()
 	if e == nil {
 		e = ce
@@ -453,33 +459,22 @@ type davService struct {
 	handler                      *webdav.Handler
 	username, salt, passwordHash string
 	slots                        chan struct{}
+	authOnce                     sync.Once
+	auth                         *davAuthenticator
+	requestOnce                  sync.Once
+	requestSlots                 chan struct{}
 }
 type davIncomingConnectionKey struct{}
 
-func (s *davService) authorized(r *http.Request) bool {
-	u, p, ok := r.BasicAuth()
-	if !ok {
-		return false
-	}
-	if len(u) > 100 || len(p) > 512 {
-		return false
-	}
-	salt, e := hex.DecodeString(s.salt)
-	if e != nil {
-		return false
-	}
-	want, e := hex.DecodeString(s.passwordHash)
-	if e != nil {
-		return false
-	}
-	got, e := pbkdf2.Key(sha256.New, p, salt, 100000, 32)
-	if e != nil {
-		return false
-	}
-	uh, wh := sha256.Sum256([]byte(u)), sha256.Sum256([]byte(s.username))
-	return subtle.ConstantTimeCompare(uh[:], wh[:])&subtle.ConstantTimeCompare(got, want) == 1
-}
 func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.requestOnce.Do(func() { s.requestSlots = make(chan struct{}, 256) })
+	select {
+	case s.requestSlots <- struct{}{}:
+		defer func() { <-s.requestSlots }()
+	default:
+		http.Error(w, "请求队列已满，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
 	started := time.Now()
 	state := &davRequestState{method: r.Method, contentLength: r.ContentLength, externalRange: r.Header.Get("Range") != ""}
 	r = r.WithContext(context.WithValue(r.Context(), davRequestKey{}, state))
@@ -535,9 +530,14 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.manager.mu.Unlock()
 		}
 	}()
-	if !s.authorized(r) {
-		rw.Header().Set("WWW-Authenticate", `Basic realm="CloudProbe WebDAV", charset="UTF-8"`)
-		http.Error(rw, "需要 WebDAV 用户名和密码", 401)
+	if code := s.authenticationStatus(r); code != 0 {
+		if code == http.StatusUnauthorized {
+			rw.Header().Set("WWW-Authenticate", `Basic realm="CloudProbe WebDAV", charset="UTF-8"`)
+			http.Error(rw, "需要 WebDAV 用户名和密码", code)
+		} else {
+			rw.Header().Set("Retry-After", "1")
+			http.Error(rw, "认证请求过多或暂不可用，请稍后重试", code)
+		}
 		return
 	}
 	logDAV(logCtx, runLogEntry{Operation: "WebDAV 请求", Source: "第三方客户端", Result: "开始", ConnectionID: connectionID, Protocol: r.Proto, LocalAddress: localAddress, RemoteAddress: r.RemoteAddr})
@@ -659,6 +659,19 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.fs.refreshPath(source)
 		if state.destination != "" {
 			s.fs.refreshPath(state.destination)
+		}
+		writeTargets := []string{target}
+		if r.Method == "MOVE" {
+			writeTargets = append(writeTargets, state.destination)
+		}
+		for _, name := range writeTargets {
+			if err := s.fs.checkNativeWrite(r.Context(), name); err != nil {
+				var statusErr *davStatusError
+				if errors.As(err, &statusErr) {
+					http.Error(rw, s.safeError(err), statusErr.Code)
+					return
+				}
+			}
 		}
 		if !s.preconditions(rw, r, source) {
 			return
@@ -877,7 +890,13 @@ type davCredential struct {
 
 func (g *guiApp) saveDAVCredential(a guiAccount, access, refresh string) error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	warn := false
+	defer func() {
+		g.mu.Unlock()
+		if warn {
+			g.event("凭据保存失败：新令牌仍在内存中使用，原文件已保留，每 30 秒重试保存；退出前请确认告警消失")
+		}
+	}()
 	identity := davIdentity(a)
 	if identity == "" {
 		return errors.New("账号缺少稳定身份标识，未修改或持久化凭据")
@@ -888,51 +907,44 @@ func (g *guiApp) saveDAVCredential(a guiAccount, access, refresh string) error {
 	}
 	for key, current := range g.accounts {
 		if davIdentity(current) == identity {
+			current = cloneGUIAccount(current)
 			current.credentials["token"] = access
 			current.credentials["refresh_token"] = refresh
 			g.accounts[key] = current
 		}
 	}
-	all := map[string]davCredential{}
-	file := filepath.Join(g.data, "webdav-credentials.bin")
-	if raw, e := os.ReadFile(file); e == nil {
-		if plain, e := unprotectLocal(raw); e == nil {
-			_ = json.Unmarshal(plain, &all)
-		}
+	if g.pendingDAVCredentials == nil {
+		g.pendingDAVCredentials = map[string]davCredential{}
 	}
-	c := all[identity]
-	c.Access = access
-	c.Refresh = refresh
-	c.BaseHash = baseHash
-	all[identity] = c
-	plain, e := json.Marshal(all)
-	if e != nil {
-		return e
+	g.pendingDAVCredentials[identity] = davCredential{Access: access, Refresh: refresh, BaseHash: baseHash}
+	if err := g.persistDAVCredentialsLocked("", ""); err != nil {
+		warn = g.credentialSaveError == ""
+		g.credentialSaveError = "新令牌已在内存生效但尚未保存；每 30 秒重试，原凭据文件保留"
+		g.scheduleCredentialRetryLocked()
+		return &davCredentialSavePendingError{Err: fmt.Errorf("%s：%w", g.credentialSaveError, err)}
 	}
-	encrypted, e := protectLocal(plain)
-	if e != nil {
-		return e
-	}
-	return writePrivateBytes(file, encrypted)
+	return nil
 }
 func (g *guiApp) applyDAVCredentials(accounts map[string]guiAccount) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.applyDAVCredentialsLocked(accounts)
+}
+func (g *guiApp) applyDAVCredentialsLocked(accounts map[string]guiAccount) {
 	for k, a := range accounts {
 		a.credentials["wopan_server_token"] = valueString(a.credentials["token"])
 		a.credentials["wopan_server_refresh_token"] = valueString(a.credentials["refresh_token"])
 		a.credentials["wopan_server_token_hash"] = credentialHash(valueString(a.credentials["token"]))
 		accounts[k] = a
 	}
-	raw, e := os.ReadFile(filepath.Join(g.data, "webdav-credentials.bin"))
-	if e != nil {
-		return
+	all, err := readDAVCredentials(filepath.Join(g.data, "webdav-credentials.bin"))
+	if err != nil {
+		all = map[string]davCredential{}
 	}
-	plain, e := unprotectLocal(raw)
-	if e != nil {
-		return
-	}
-	all := map[string]davCredential{}
-	if json.Unmarshal(plain, &all) != nil {
-		return
+	for identity, pending := range g.pendingDAVCredentials {
+		c := all[identity]
+		c.Access, c.Refresh, c.BaseHash = pending.Access, pending.Refresh, pending.BaseHash
+		all[identity] = c
 	}
 	for k, a := range accounts {
 		identity := davIdentity(a)
@@ -965,33 +977,12 @@ func (g *guiApp) saveDAVWebCredential(a guiAccount, token string) error {
 	if identity == "" {
 		return errors.New("账号缺少稳定身份标识，未保存官网授权")
 	}
-	file := filepath.Join(g.data, "webdav-credentials.bin")
-	all := map[string]davCredential{}
-	if raw, e := os.ReadFile(file); e == nil {
-		plain, e := unprotectLocal(raw)
-		if e != nil {
-			return e
-		}
-		if e = json.Unmarshal(plain, &all); e != nil {
-			return e
-		}
-	}
-	c := all[identity]
-	c.WebToken = token
-	all[identity] = c
-	plain, e := json.Marshal(all)
-	if e != nil {
-		return e
-	}
-	encrypted, e := protectLocal(plain)
-	if e != nil {
-		return e
-	}
-	if e = writePrivateBytes(file, encrypted); e != nil {
-		return e
+	if err := g.persistDAVCredentialsLocked(identity, token); err != nil {
+		return err
 	}
 	for key, current := range g.accounts {
 		if davIdentity(current) == identity {
+			current = cloneGUIAccount(current)
 			current.credentials["wopan_web_token"] = token
 			current.WebBound = token != ""
 			g.accounts[key] = current

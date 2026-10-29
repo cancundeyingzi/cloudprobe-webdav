@@ -245,6 +245,8 @@ type transferReader struct {
 	waveStart, waveNext int64
 	waveCancel          context.CancelFunc
 	waveWG              sync.WaitGroup
+	memory              *byteBudget
+	waveRelease         func()
 	buffer              []byte
 	bufferOffset        int
 	closed              bool
@@ -257,9 +259,11 @@ type transferReader struct {
 func newTransferReader(ctx context.Context, m *davMount, it davEntry, runtime *transferRuntime) *transferReader {
 	o := transferOptions{}.defaults()
 	var budget *fairLimiter
+	memory := defaultDownloadMemory
 	if runtime != nil {
 		o = runtime.options
 		budget = runtime.connections
+		memory = runtime.downloadMemory
 	}
 	routes := routesFor(ctx, m.drive, it)
 	resolved := make([]*resolvedReadRoute, len(routes))
@@ -275,8 +279,11 @@ func newTransferReader(ctx context.Context, m *davMount, it davEntry, runtime *t
 		part = max(part, (it.Size+int64(o.DownloadConcurrency*32)-1)/int64(o.DownloadConcurrency*32))
 		part = min(part, 32<<20)
 	}
-	return &transferReader{ctx: ctx, size: it.Size, threads: o.DownloadConcurrency, partSize: part, parallel: parallel, started: time.Now(), session: &downloadSession{ctx: ctx, routes: resolved, health: m.health, budget: budget, size: it.Size}}
+	return &transferReader{ctx: ctx, memory: memory, size: it.Size, threads: o.DownloadConcurrency, partSize: part, parallel: parallel, started: time.Now(), session: &downloadSession{ctx: ctx, routes: resolved, health: m.health, budget: budget, size: it.Size}}
 }
+
+var defaultDownloadMemory = newByteBudget(128 << 20)
+
 func (d *transferReader) closeStream() {
 	if d.stream != nil {
 		d.stream.Close()
@@ -296,6 +303,10 @@ func (d *transferReader) stopWave() {
 	d.wave = nil
 	d.buffer = nil
 	d.bufferOffset = 0
+	if d.waveRelease != nil {
+		d.waveRelease()
+		d.waveRelease = nil
+	}
 }
 func (d *transferReader) Close() {
 	if d.closed {
@@ -335,12 +346,23 @@ func (d *transferReader) Seek(off int64, whence int) (int64, error) {
 	}
 	return target, nil
 }
-func (d *transferReader) startWave() {
+func (d *transferReader) startWave() error {
+	n := min(d.threads, int((d.size-d.pos+d.partSize-1)/d.partSize))
+	// Reserve the entire window before starting workers. Independent, out of
+	// order reservations can deadlock while each reader waits for its first part.
+	if d.memory == nil {
+		d.memory = defaultDownloadMemory
+	}
+	n = min(n, max(1, int(d.memory.limit/d.partSize)))
+	release, err := d.memory.acquire(d.ctx, min(int64(n)*d.partSize, d.size-d.pos))
+	if err != nil {
+		return err
+	}
+	d.waveRelease = release
 	ctx, cancel := context.WithCancel(d.ctx)
 	d.waveCancel = cancel
 	d.waveStart = d.pos
 	d.waveNext = 0
-	n := min(d.threads, int((d.size-d.pos+d.partSize-1)/d.partSize))
 	d.wave = make([]chan readChunkResult, n)
 	for i := 0; i < n; i++ {
 		start := d.pos + int64(i)*d.partSize
@@ -349,6 +371,7 @@ func (d *transferReader) startWave() {
 		d.wave[i] = ch
 		d.waveWG.Go(func() { data, e := d.session.chunk(ctx, start, end); ch <- readChunkResult{data, e} })
 	}
+	return nil
 }
 func (d *transferReader) Read(p []byte) (int, error) {
 	if d.closed {
@@ -389,21 +412,27 @@ func (d *transferReader) Read(p []byte) (int, error) {
 	if d.parallel && (len(p) > 512 || d.wave != nil) {
 		d.closeStream()
 		if d.wave == nil {
-			d.startWave()
+			if err := d.startWave(); err != nil {
+				return 0, err
+			}
 		}
 		if d.bufferOffset >= len(d.buffer) {
 			if int(d.waveNext) >= len(d.wave) {
 				d.stopWave()
-				d.startWave()
+				if err := d.startWave(); err != nil {
+					return 0, err
+				}
 			}
 			var result readChunkResult
 			select {
 			case result = <-d.wave[d.waveNext]:
 			case <-d.ctx.Done():
+				d.stopWave()
 				return 0, d.ctx.Err()
 			}
 			d.waveNext++
 			if result.err != nil {
+				d.stopWave()
 				if errors.Is(result.err, errRangeUnavailable) && d.pos == 0 {
 					d.stopWave()
 					d.parallel = false
@@ -420,6 +449,9 @@ func (d *transferReader) Read(p []byte) (int, error) {
 		d.bufferOffset += n
 		d.pos += int64(n)
 		d.count(n)
+		if d.bufferOffset == len(d.buffer) && int(d.waveNext) == len(d.wave) {
+			d.stopWave()
+		}
 		return n, nil
 	}
 	for {

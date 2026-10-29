@@ -6,7 +6,7 @@ CloudProbe 将网易爆米花绑定的联通/移动云盘及独立登录的夸�
 
 - 网易爆米花扫码与独立夸克 App、手机号、微信、开放平台登录。
 - WebDAV 文件浏览、下载、Range、上传、覆盖、目录操作、移动、复制、锁与剩余空间查询。
-- 网易接口、云盘原生接口与可选 OpenList 服务间回退，并核对版本及提交结果。
+- 网易接口、云盘原生接口与可选 OpenList 服务间进行目录和下载回退；写入使用原生接口，并核对版本及提交结果。OpenList 路径不能提供稳定对象身份，因此备用通道不执行写入。
 - 可配置云端分片、并发、总体上传低速恢复和共享缓存预算。
 - 严格纯内存、内存优先、磁盘兼容三种上传缓存方式。缓存上限约束文件正文，不代表整个进程的内存上限。
 
@@ -28,6 +28,10 @@ go test -mod=vendor ./...
 go vet -mod=vendor ./...
 go build -mod=vendor -trimpath -o CloudProbe.exe .
 ```
+
+仓库包含依赖所需的 `publicsuffix/data` 嵌入文件。CI 从干净检出验证 Windows/Linux 测试、静态检查、Linux 竞态检测和 Windows 构建。WebDAV 本地修改的可重放补丁为 `third_party/webdav.patch`，维护步骤见 `third_party/webdav-quota.md`。
+
+本轮审查修补的行为限制、资源预算和验证说明见 [发布审查修补说明](docs/发布审查修补说明.md)。Windows 凭据使用 DPAPI；其他平台目前仅使用私有文件权限保护，尚未提供凭据加密。
 
 GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号安全，原版 SDK 二进制不放在 GitHub 仓库中。取得可用 SDK 后生成桥接组件：
 

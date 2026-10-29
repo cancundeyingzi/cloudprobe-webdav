@@ -8,6 +8,8 @@ import (
 	"unsafe"
 )
 
+const localCredentialsEncrypted = true
+
 type localBlob struct {
 	Size uint32
 	Data *byte

@@ -297,6 +297,12 @@ func (b *backupDAVDrive) List(ctx context.Context, parent string) ([]davEntry, e
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	if state := davState(ctx); state != nil {
+		switch state.method {
+		case "PUT", "MOVE", "COPY", "DELETE", "MKCOL", "LOCK", "PROPPATCH":
+			return nil, fmt.Errorf("写入需要原生目录身份核验，OpenList 备用仅支持读取：%w", e)
+		}
+	}
 	logFallback(ctx, "内置目录接口", "OpenList 服务", e)
 	fallback, other := b.listBackup(ctx, parent)
 	if other != nil {
@@ -350,137 +356,48 @@ func safePreexecutionFailure(e error) bool {
 	}
 	return false
 }
-func (b *backupDAVDrive) findBackup(ctx context.Context, parent, name string) (davEntry, error) {
-	items, e := b.listBackup(ctx, parent)
-	if e != nil {
-		return davEntry{}, e
-	}
-	for _, it := range items {
-		if it.Name == name {
-			return it, nil
-		}
-	}
-	return davEntry{}, os.ErrNotExist
-}
+
+// OpenList path IDs cannot prove object identity after a rename. All mutations
+// use the native driver, including after an explicit native rejection.
+var errOpenListReadOnly = errors.New("OpenList 备用通道仅支持目录和下载；此写入需要原生接口及稳定对象身份")
+
 func (b *backupDAVDrive) Mkdir(ctx context.Context, parent, name string) (davEntry, error) {
-	var err error
-	if !strings.HasPrefix(parent, "openlist:") {
-		it, e := b.primary.Mkdir(ctx, parent, name)
-		if e == nil {
-			b.remember(parent, []davEntry{it})
-			return it, nil
-		}
-		err = e
-		if !safePreexecutionFailure(e) {
-			return davEntry{}, e
-		}
+	if strings.HasPrefix(parent, "openlist:") {
+		return davEntry{}, &davNotExecuted{errOpenListReadOnly}
 	}
-	rel, e := b.relative(parent)
-	if e != nil {
-		return davEntry{}, e
+	it, err := b.primary.Mkdir(ctx, parent, name)
+	if err == nil {
+		b.remember(parent, []davEntry{it})
 	}
-	logFallback(ctx, "内置新建目录", "OpenList 服务", err)
-	_, e = b.backup.call(ctx, "POST", "/fs/mkdir", map[string]any{"path": path.Join(b.backup.cfg.Root, rel, name)}, nil, 0, nil)
-	if e != nil {
-		return davEntry{}, e
-	}
-	return b.findBackup(ctx, parent, name)
+	return it, err
 }
 func (b *backupDAVDrive) Upload(ctx context.Context, parent, name string, f *os.File) (davEntry, error) {
-	var primary error
-	if !strings.HasPrefix(parent, "openlist:") {
-		it, e := b.primary.Upload(ctx, parent, name, f)
-		if e == nil {
-			b.remember(parent, []davEntry{it})
-			return it, nil
-		}
-		primary = e
-		if ctx.Err() != nil {
-			return davEntry{}, ctx.Err()
-		}
-		if !safePreexecutionFailure(e) {
-			if found, check := b.findBackup(ctx, parent, name); check == nil {
-				fi, _ := f.Stat()
-				if fi != nil && found.Size == fi.Size() {
-					return found, nil
-				}
-			}
-			return davEntry{}, fmt.Errorf("内置上传结果不明确，未重放到 OpenList：%w", e)
-		}
+	if strings.HasPrefix(parent, "openlist:") {
+		return davEntry{}, &davNotExecuted{errOpenListReadOnly}
 	}
-	rel, e := b.relative(parent)
-	if e != nil {
-		return davEntry{}, e
+	it, err := b.primary.Upload(ctx, parent, name, f)
+	if err == nil {
+		b.remember(parent, []davEntry{it})
 	}
-	fi, e := f.Stat()
-	if e != nil {
-		return davEntry{}, e
-	}
-	logFallback(ctx, "内置上传", "OpenList 服务", primary)
-	headers := http.Header{"File-Path": []string{path.Join(b.backup.cfg.Root, rel, name)}, "Password": []string{b.backup.cfg.MetaPassword}}
-	_, e = b.backup.call(ctx, "PUT", "/fs/put", nil, io.NewSectionReader(f, 0, fi.Size()), fi.Size(), headers)
-	if e != nil {
-		return davEntry{}, e
-	}
-	return b.findBackup(ctx, parent, name)
+	return it, err
 }
 func (b *backupDAVDrive) Remove(ctx context.Context, it davEntry) error {
-	var primary error
-	if !strings.HasPrefix(it.ID, "openlist:") {
-		primary = b.primary.Remove(ctx, it)
-		if primary == nil {
-			return nil
-		}
-		if !safePreexecutionFailure(primary) {
-			return fmt.Errorf("删除结果不明确，未重放：%w", primary)
-		}
+	if strings.HasPrefix(it.ID, "openlist:") {
+		return &davNotExecuted{errOpenListReadOnly}
 	}
-	rel, e := b.relative(it.ID)
-	if e != nil {
-		return e
-	}
-	logFallback(ctx, "内置删除", "OpenList 服务", primary)
-	_, e = b.backup.call(ctx, "POST", "/fs/remove", map[string]any{"dir": path.Join(b.backup.cfg.Root, path.Dir(rel)), "names": []string{path.Base(rel)}}, nil, 0, nil)
-	return e
+	return b.primary.Remove(ctx, it)
 }
 func (b *backupDAVDrive) Move(ctx context.Context, it davEntry, parent, name string) error {
-	var primary error
-	if !strings.HasPrefix(it.ID, "openlist:") && !strings.HasPrefix(parent, "openlist:") {
-		primary = b.primary.Move(ctx, it, parent, name)
-		if primary == nil {
-			b.moved(it, parent, name)
-			return nil
-		}
-		if !safePreexecutionFailure(primary) {
-			return fmt.Errorf("改名/移动结果不明确，未重放：%w", primary)
-		}
+	if strings.HasPrefix(it.ID, "openlist:") || strings.HasPrefix(parent, "openlist:") {
+		return &davNotExecuted{errOpenListReadOnly}
 	}
-	rel, e := b.relative(it.ID)
-	if e != nil {
-		return e
-	}
-	logFallback(ctx, "内置改名/移动", "OpenList 服务", primary)
-	if name != it.Name {
-		_, e = b.backup.call(ctx, "POST", "/fs/rename", map[string]any{"path": path.Join(b.backup.cfg.Root, rel), "name": name}, nil, 0, nil)
-		if e != nil {
-			return e
-		}
-		b.moved(it, "", name)
-		rel, _ = b.relative(it.ID)
-	}
-	if parent == "" {
-		return nil
-	}
-	dst, e := b.relative(parent)
-	if e != nil {
-		return e
-	}
-	_, e = b.backup.call(ctx, "POST", "/fs/move", map[string]any{"src_dir": path.Join(b.backup.cfg.Root, path.Dir(rel)), "dst_dir": path.Join(b.backup.cfg.Root, dst), "names": []string{name}}, nil, 0, nil)
-	if e == nil {
+	err := b.primary.Move(ctx, it, parent, name)
+	if err == nil {
 		b.moved(it, parent, name)
 	}
-	return e
+	return err
 }
+
 func (g *guiApp) openListConfig(key string, in *openListInput, identity string) (*openListSaved, error) {
 	file := g.data + string(os.PathSeparator) + "openlist-config.bin"
 	all := map[string]openListSaved{}
@@ -492,6 +409,11 @@ func (g *guiApp) openListConfig(key string, in *openListInput, identity string) 
 		if e = json.Unmarshal(plain, &all); e != nil {
 			return nil, e
 		}
+		if all == nil {
+			return nil, errors.New("OpenList 凭据存储格式损坏，保留原文件")
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return nil, fmt.Errorf("读取 OpenList 凭据失败，保留原文件：%w", e)
 	}
 	previous := all[key]
 	if in == nil {
@@ -526,6 +448,11 @@ func (g *guiApp) saveOpenList(key string, cfg openListSaved) error {
 		if e = json.Unmarshal(plain, &all); e != nil {
 			return e
 		}
+		if all == nil {
+			return errors.New("OpenList 凭据存储格式损坏，保留原文件")
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return fmt.Errorf("读取 OpenList 凭据失败，保留原文件：%w", e)
 	}
 	all[key] = cfg
 	plain, e := json.Marshal(all)

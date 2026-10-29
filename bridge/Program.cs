@@ -88,11 +88,17 @@ internal static class SdkHost
             while ((line = await Console.In.ReadLineAsync()) != null)
             {
                 long id = -1;
+                bool dispatched = false;
                 try
                 {
                     using var doc = JsonDocument.Parse(line);
                     var root = doc.RootElement;
                     id = root.GetProperty("id").GetInt64();
+                    if (!root.TryGetProperty("deadline_unix_ms", out var deadlineField) ||
+                        !deadlineField.TryGetInt64(out long deadlineMs))
+                        throw new ArgumentException("桥接请求缺少截止时间，请更新主程序");
+                    long remainingMs = deadlineMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    if (remainingMs <= 0) throw new TimeoutException("排队请求已过期，未调用 SDK");
                     string kind = root.GetProperty("kind").GetString();
                     if (kind == "stop") { Program.Reply(new { id, ok = true }); break; }
                     if (kind == "identity") { Program.Reply(ReadMobileIdentity(id)); continue; }
@@ -115,15 +121,19 @@ internal static class SdkHost
                     if (root.TryGetProperty("headers", out var h) && h.ValueKind == JsonValueKind.Object)
                         foreach (var v in h.EnumerateObject()) headers[v.Name] = v.Value.GetString();
                     var callback = new Callback();
+                    remainingMs = deadlineMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    if (remainingMs <= 0) throw new TimeoutException("请求已过期，未调用 SDK");
+                    dispatched = true;
                     requests.Request(new RequestInfo(method, path, headers, parameters ?? "{}"), callback);
-                    var response = await callback.Task.WaitAsync(TimeSpan.FromSeconds(35));
+                    var response = await callback.Task.WaitAsync(TimeSpan.FromMilliseconds(Math.Min(35000, remainingMs)));
                     Program.Reply(new { id, ok = response.Code == 0, code = response.Code,
                         error = response.Code == 0 ? "" : "原版引擎请求失败，错误码 " + response.Code,
                         body = response.Body });
                 }
                 catch (Exception e)
                 {
-                    Program.Reply(new { id, ok = false, error = e.GetType().Name + ": " + e.Message });
+                    Program.Reply(new { id, ok = false, not_executed = !dispatched, result_unknown = dispatched,
+                        error = e.GetType().Name + ": " + e.Message });
                 }
             }
         }

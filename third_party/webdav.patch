@@ -1,0 +1,170 @@
+--- a/vendor/golang.org/x/net/webdav/prop.go
++++ b/vendor/golang.org/x/net/webdav/prop.go
+@@ -107,6 +107,10 @@
+ 	// dir is true if the property applies to directories.
+ 	dir bool
+ }{
++	// CloudProbe: RFC 4331 protected live properties are resolved lazily through
++	// QuotaFileSystem. Register them here to reject PROPPATCH before any write.
++	{Space: "DAV:", Local: "quota-used-bytes"}:      {},
++	{Space: "DAV:", Local: "quota-available-bytes"}: {},
+ 	{Space: "DAV:", Local: "resourcetype"}: {
+ 		findFn: findResourceType,
+ 		dir:    true,
+@@ -188,7 +192,37 @@
+ 
+ 	pstatOK := Propstat{Status: http.StatusOK}
+ 	pstatNotFound := Propstat{Status: http.StatusNotFound}
++	pstatUnavailable := Propstat{Status: http.StatusBadGateway, ResponseDescription: "Upstream storage quota is temporarily unavailable"}
++	var quotaLoaded bool
++	var quotaUsed, quotaAvailable int64
++	var quotaErr error
+ 	for _, pn := range pnames {
++		if isQuotaProperty(pn) {
++			qfs, supported := fs.(QuotaFileSystem)
++			if !isDir || !supported || !qfs.QuotaSupported(name) {
++				pstatNotFound.Props = append(pstatNotFound.Props, Property{XMLName: pn})
++				continue
++			}
++			if !quotaLoaded {
++				quotaLoaded = true
++				quotaUsed, quotaAvailable, quotaErr = qfs.Quota(ctx, name)
++				if quotaUsed < 0 || quotaAvailable < 0 {
++					quotaErr = errors.New("invalid negative quota")
++				}
++			}
++			if errors.Is(quotaErr, errors.ErrUnsupported) {
++				pstatNotFound.Props = append(pstatNotFound.Props, Property{XMLName: pn})
++			} else if quotaErr != nil {
++				pstatUnavailable.Props = append(pstatUnavailable.Props, Property{XMLName: pn})
++			} else {
++				value := quotaUsed
++				if pn.Local == "quota-available-bytes" {
++					value = quotaAvailable
++				}
++				pstatOK.Props = append(pstatOK.Props, Property{XMLName: pn, InnerXML: []byte(strconv.FormatInt(value, 10))})
++			}
++			continue
++		}
+ 		// If this file has dead properties, check if they contain pn.
+ 		if dp, ok := deadProps[pn]; ok {
+ 			pstatOK.Props = append(pstatOK.Props, dp)
+@@ -210,7 +244,14 @@
+ 			})
+ 		}
+ 	}
+-	return makePropstats(pstatOK, pstatNotFound), nil
++	stats := makePropstats(pstatOK, pstatNotFound)
++	if len(pstatUnavailable.Props) != 0 {
++		if len(pstatOK.Props) == 0 && len(pstatNotFound.Props) == 0 {
++			stats = nil
++		}
++		stats = append(stats, pstatUnavailable)
++	}
++	return stats, nil
+ }
+ 
+ // propnames returns the property names defined for resource name.
+@@ -243,6 +284,9 @@
+ 	for pn := range deadProps {
+ 		pnames = append(pnames, pn)
+ 	}
++	if qfs, ok := fs.(QuotaFileSystem); ok && isDir && qfs.QuotaSupported(name) {
++		pnames = append(pnames, quotaProperties...)
++	}
+ 	return pnames, nil
+ }
+ 
+@@ -259,6 +303,16 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// RFC 4331 section 2 excludes quotas from ordinary allprop. Explicit
++	// DAV:include below can add them back without making directory browsing
++	// depend on a provider's account-capacity API.
++	filtered := pnames[:0]
++	for _, pn := range pnames {
++		if !isQuotaProperty(pn) {
++			filtered = append(filtered, pn)
++		}
++	}
++	pnames = filtered
+ 	// Add names from include if they are not already covered in pnames.
+ 	nameset := make(map[xml.Name]bool)
+ 	for _, pn := range pnames {
+--- a/vendor/golang.org/x/net/webdav/webdav.go
++++ b/vendor/golang.org/x/net/webdav/webdav.go
+@@ -304,6 +304,14 @@
+ 	if closeErr != nil {
+ 		return http.StatusMethodNotAllowed, closeErr
+ 	}
++	// Cloud-backed files may commit on Close. Never advertise their temporary
++	// pre-commit metadata as the validator of the completed PUT.
++	if committed, ok := f.(interface{ CommittedInfo() (os.FileInfo, error) }); ok {
++		fi, err = committed.CommittedInfo()
++		if err != nil || fi == nil {
++			return http.StatusCreated, nil
++		}
++	}
+ 	etag, err := findETag(ctx, h.FileSystem, h.LockSystem, reqPath, fi)
+ 	if err != nil {
+ 		return http.StatusInternalServerError, err
+@@ -481,12 +489,17 @@
+ 
+ 		// Create the resource if it didn't previously exist.
+ 		if _, err := h.FileSystem.Stat(ctx, reqPath); err != nil {
+-			f, err := h.FileSystem.OpenFile(ctx, reqPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
++			if !os.IsNotExist(err) {
++				return http.StatusInternalServerError, err
++			}
++			f, err := h.FileSystem.OpenFile(ctx, reqPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+ 			if err != nil {
+ 				// TODO: detect missing intermediate dirs and return http.StatusConflict?
+ 				return http.StatusInternalServerError, err
+ 			}
+-			f.Close()
++			if err := f.Close(); err != nil {
++				return http.StatusInternalServerError, err
++			}
+ 			created = true
+ 		}
+ 
+@@ -573,7 +586,7 @@
+ 			}
+ 			pstats = append(pstats, pstat)
+ 		} else if pf.Allprop != nil {
+-			pstats, err = allprop(ctx, h.FileSystem, h.LockSystem, reqPath, pf.Prop)
++			pstats, err = allprop(ctx, h.FileSystem, h.LockSystem, reqPath, pf.Include)
+ 		} else {
+ 			pstats, err = props(ctx, h.FileSystem, h.LockSystem, reqPath, pf.Prop)
+ 		}
+--- /dev/null
++++ b/vendor/golang.org/x/net/webdav/quota.go
+@@ -0,0 +1,27 @@
++// CloudProbe local extension to golang.org/x/net/webdav v0.61.0.
++// See third_party/webdav-quota.md for the patch's scope and maintenance notes.
++package webdav
++
++import (
++	"context"
++	"encoding/xml"
++)
++
++// QuotaFileSystem optionally exposes the protected live properties defined by
++// RFC 4331. Values use bytes. QuotaSupported must not fetch remote capacity;
++// transient lookup failures belong to Quota and are returned per property.
++// Quota properties apply only to collections and are excluded from allprop
++// unless explicitly requested with DAV:include.
++type QuotaFileSystem interface {
++	QuotaSupported(name string) bool
++	Quota(ctx context.Context, name string) (usedBytes, availableBytes int64, err error)
++}
++
++var quotaProperties = []xml.Name{
++	{Space: "DAV:", Local: "quota-used-bytes"},
++	{Space: "DAV:", Local: "quota-available-bytes"},
++}
++
++func isQuotaProperty(name xml.Name) bool {
++	return name == quotaProperties[0] || name == quotaProperties[1]
++}

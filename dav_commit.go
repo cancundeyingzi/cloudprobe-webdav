@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -72,6 +73,9 @@ func (d *davFile) CommittedInfo() (os.FileInfo, error) {
 // Names and sizes are insufficient after a lost acknowledgement. Prefer the
 // cloud object ID; a supplied immutable version must also remain consistent.
 func sameCloudObject(a, b davEntry) bool {
+	if strings.HasPrefix(a.ID, "openlist:") || strings.HasPrefix(b.ID, "openlist:") {
+		return false // OpenList exposes locations, not stable object identities.
+	}
 	return a.ID != "" && a.ID == b.ID && (a.FID == "" || b.FID == "" || a.FID == b.FID)
 }
 func uniqueNamedEntry(entries []davEntry, name string) (*davEntry, error) {

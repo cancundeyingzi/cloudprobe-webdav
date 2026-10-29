@@ -60,32 +60,35 @@ func cloneGUIAccount(a guiAccount) guiAccount {
 }
 
 type guiApp struct {
-	quark         *quarkManager
-	extraSecrets  []string
-	runLog        *runtimeLog
-	webLogin      *wopanWebLogin
-	dav           *davManager
-	mu            sync.Mutex
-	op            sync.Mutex
-	bridge        *OriginalBridge
-	stage         string
-	engineError   string
-	logged        bool
-	user          string
-	qrToken       string
-	qrExpires     time.Time
-	pollAfter     int64
-	accounts      map[string]guiAccount
-	browseEntries map[string]map[string]davEntry
-	accountOrder  []string
-	identity      MobileConfig
-	data          string
-	lastResult    string
-	downloads     map[string]guiDownload
-	events        []string
-	nonce         string
-	host          string
-	shutdown      context.CancelFunc
+	quark                 *quarkManager
+	extraSecrets          []string
+	runLog                *runtimeLog
+	webLogin              *wopanWebLogin
+	dav                   *davManager
+	mu                    sync.Mutex
+	op                    sync.Mutex
+	bridge                *OriginalBridge
+	stage                 string
+	engineError           string
+	logged                bool
+	user                  string
+	qrToken               string
+	qrExpires             time.Time
+	pollAfter             int64
+	accounts              map[string]guiAccount
+	pendingDAVCredentials map[string]davCredential
+	credentialSaveError   string
+	credentialRetry       *time.Timer
+	browseEntries         map[string]map[string]davEntry
+	accountOrder          []string
+	identity              MobileConfig
+	data                  string
+	lastResult            string
+	downloads             map[string]guiDownload
+	events                []string
+	nonce                 string
+	host                  string
+	shutdown              context.CancelFunc
 }
 
 func randomKey() string { b := make([]byte, 20); _, _ = rand.Read(b); return hex.EncodeToString(b) }
@@ -165,8 +168,8 @@ func (g *guiApp) loadAccounts(ctx context.Context) error {
 			order = append(order, key)
 		}
 	}
-	g.applyDAVCredentials(accounts)
 	g.mu.Lock()
+	g.applyDAVCredentialsLocked(accounts)
 	for _, key := range g.accountOrder {
 		if a, ok := g.accounts[key]; ok && a.Provider == "quark" {
 			accounts[key] = a
@@ -223,6 +226,9 @@ func (g *guiApp) publicStatus() map[string]any {
 		engineError = "原版桥接进程已退出，请关闭工具后重新启动"
 	}
 	out := map[string]any{"version": version, "engine_ready": g.bridge.Alive(), "stage": g.stage, "engine_error": engineError, "logged_in": g.logged, "user": g.user, "accounts": accounts, "has_accounts": len(accounts) > 0, "events": append([]string(nil), g.events...), "qr_expires": g.qrExpires.Unix(), "poll_after_seconds": g.pollAfter, "has_result": g.lastResult != ""}
+	out["credential_save_pending"] = len(g.pendingDAVCredentials)
+	out["credential_save_error"] = g.credentialSaveError
+	out["secret_storage_encrypted"] = localCredentialsEncrypted
 	dav := g.dav
 	g.mu.Unlock()
 	if dav != nil {

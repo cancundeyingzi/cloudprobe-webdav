@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,7 @@ type transferOptions struct {
 	DownloadConcurrency  int     `json:"download_concurrency"`
 	DownloadPartMiB      int     `json:"download_part_mib"`
 	DownloadPartMode     string  `json:"download_part_mode"`
+	DownloadMemoryMiB    int     `json:"download_memory_mib"`
 	ConcurrentUploads    int     `json:"concurrent_uploads"`
 	ConcurrentDownloads  int     `json:"concurrent_downloads"`
 	TotalConnections     int     `json:"total_connections"`
@@ -44,6 +46,9 @@ func (o transferOptions) defaults() transferOptions {
 	}
 	if o.DownloadPartMode == "" {
 		o.DownloadPartMode = "auto"
+	}
+	if o.DownloadMemoryMiB == 0 {
+		o.DownloadMemoryMiB = 128
 	}
 	if o.ConcurrentUploads == 0 {
 		o.ConcurrentUploads = 3
@@ -81,6 +86,9 @@ func (o transferOptions) defaults() transferOptions {
 	return o
 }
 func (o transferOptions) validate() error {
+	if o.DownloadMemoryMiB < 32 || o.DownloadMemoryMiB > 1024 {
+		return errors.New("下载预取全局内存预算需为 32—1024 MiB")
+	}
 	if o.TransferScheduling != "client" && o.TransferScheduling != "server" {
 		return errors.New("并发调度方式需为 client 或 server")
 	}
@@ -238,6 +246,8 @@ type transferRuntime struct {
 	uploads, downloads *fileScheduler
 	connections        *fairLimiter
 	memory             *byteBudget
+	downloadMemory     *byteBudget
+	downloadRequests   atomic.Uint64
 	recovery           *uploadRecovery
 }
 
@@ -247,13 +257,13 @@ func newTransferRuntime(o transferOptions) *transferRuntime {
 	if o.TransferScheduling == "client" {
 		uploads, downloads = 0, 0
 	}
-	return &transferRuntime{options: o, uploads: newFileScheduler(uploads), downloads: newFileScheduler(downloads), connections: newFairLimiter(o.TotalConnections), memory: newByteBudget(int64(o.TotalUploadMemoryMiB) << 20), recovery: newUploadRecovery(o)}
+	return &transferRuntime{options: o, uploads: newFileScheduler(uploads), downloads: newFileScheduler(downloads), connections: newFairLimiter(o.TotalConnections), memory: newByteBudget(int64(o.TotalUploadMemoryMiB) << 20), downloadMemory: newByteBudget(int64(o.DownloadMemoryMiB) << 20), recovery: newUploadRecovery(o)}
 }
 func (t *transferRuntime) status() map[string]any {
 	if t == nil {
 		return map[string]any{}
 	}
-	return map[string]any{"uploads": t.uploads.limiter.status(), "downloads": t.downloads.limiter.status(), "connections": t.connections.status(), "upload_memory": t.memory.status(), "upload_recovery": t.recovery.status()}
+	return map[string]any{"uploads": t.uploads.limiter.status(), "downloads": t.downloads.limiter.status(), "connections": t.connections.status(), "upload_memory": t.memory.status(), "download_memory": t.downloadMemory.status(), "upload_recovery": t.recovery.status()}
 }
 
 type transferRuntimeKey struct{}
@@ -273,6 +283,8 @@ func (t *transferRuntime) file(ctx context.Context, kind, key string) (func(), e
 	s := t.downloads
 	if kind == "上传" {
 		s = t.uploads
+	} else if state := davState(ctx); state != nil && !state.externalRange {
+		key = fmt.Sprintf("%s\x00request:%d", key, t.downloadRequests.Add(1))
 	}
 	logDAV(ctx, runLogEntry{Operation: "文件调度", Source: "本机", Result: "等待", Detail: kind + "文件：" + key})
 	release, err := s.acquire(ctx, key)

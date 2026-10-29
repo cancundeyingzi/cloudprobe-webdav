@@ -29,7 +29,9 @@ type davEntry struct {
 	Modified time.Time
 }
 
-// All methods operate on cloud IDs. Local temporary files are only upload spools.
+// Mutation IDs must remain stable across rename/move and must never be reused
+// for another object. OpenList path references are restricted to read operations.
+// Local temporary files are only upload spools.
 type davDrive interface {
 	List(context.Context, string) ([]davEntry, error)
 	URL(context.Context, davEntry) (string, error)
@@ -145,7 +147,7 @@ func newWopanDAVDrive(cl *Client, credentials map[string]any, root string, refre
 		cl.cfg.Wopan.AccessToken = access
 		d.mu.Unlock()
 		if d.onRefresh != nil {
-			if e := d.onRefresh(access, refresh); e != nil {
+			if e := saveRefreshedDAVCredential(context.Background(), d.onRefresh, access, refresh); e != nil {
 				d.directErr = "令牌已刷新，但持久化失败：" + cl.redact.Text(e.Error())
 			}
 		}
@@ -193,10 +195,7 @@ func (d *wopanDAVDrive) refreshNative(ctx context.Context) (err error) {
 		d.w.SetRefreshToken(nextRefresh)
 	}
 	d.serverRefresh = nextRefresh
-	if d.onRefresh != nil {
-		return d.onRefresh(access, nextRefresh)
-	}
-	return nil
+	return saveRefreshedDAVCredential(ctx, d.onRefresh, access, nextRefresh)
 }
 func woContext(ctx context.Context) wopan.RestyOption {
 	return func(r *resty.Request) { r.SetContext(ctx) }
@@ -765,10 +764,7 @@ func (d *mobileDAVDrive) refresh(ctx context.Context) error {
 	d.client.redact.Add(access)
 	cl.cfg.Mobile.AccessToken = access
 	d.client.cfg.Mobile.AccessToken = access
-	if d.onRefresh != nil {
-		return d.onRefresh(access, "")
-	}
-	return nil
+	return saveRefreshedDAVCredential(ctx, d.onRefresh, access, "")
 }
 
 func mobileResult(raw []byte) (map[string]any, error) {
@@ -904,7 +900,7 @@ func (d *mobileDAVDrive) Upload(ctx context.Context, parent, name string, f *os.
 		return davEntry{}, e
 	}
 	h := md5.New()
-	if _, e = io.Copy(h, f); e != nil {
+	if _, e = copyWithContext(ctx, h, f); e != nil {
 		return davEntry{}, e
 	}
 	size := strconv.FormatInt(fi.Size(), 10)

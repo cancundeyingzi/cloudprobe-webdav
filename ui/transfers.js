@@ -7,6 +7,7 @@ const transferFields = [
   ['download_concurrency','云端单文件下载分片并发',8,1,16,1,'download-fields','server'],
   ['upload_part_mib','云端上传分片大小（MiB）',5,5,16,1,'upload-advanced'],
   ['download_part_mib','云端下载分片大小（MiB）',5,4,32,1,'download-fields','server'],
+  ['download_memory_mib','下载预取正文内存上限（MiB）',128,32,1024,1,'download-fields','server'],
   ['total_connections','云端正文请求总并发预算',64,1,160,1,'upload-advanced'],
   ['upload_low_speed_mb','总体低速阈值 X（MB/s）',1,0.01,10000,0.01,'recovery-fields','recovery'],
   ['upload_low_seconds','持续低速检测窗口（秒）',5,1,120,1,'recovery-fields','recovery'],
@@ -99,6 +100,8 @@ function renderTransferQueues(d) {
     add(label,q ? q.active + (q.limit ? ' / ' + q.limit : ' 个') : '未启动',q ? (q.limit ? '排队 ' + q.queued : '客户端调度 · 不设文件数量上限') : '启动 WebDAV 后显示');
   }
   const recovery = queues.upload_recovery || {}, memory = queues.upload_memory || {};
+  const downloadMemory = queues.download_memory || {};
+  add('下载预取缓存',d.running ? Math.round((downloadMemory.used_bytes || 0) / 1048576) + ' / ' + Math.round((downloadMemory.limit_bytes || 0) / 1048576) + ' MiB' : '未启动',d.running ? '等待内存 ' + (downloadMemory.queued || 0) + ' · 窗口消费或丢弃后释放' : '启动 WebDAV 后显示');
   const recoveryState = recovery.bandwidth_limited ? '按带宽受限处理，停止主动暂停' : recovery.paused ? '全部上传暂停中，1 秒后继续' : recovery.enabled ? '总体速度监测中' : '主动低速恢复未启用';
   add('总体上传速度',recovery.scope ? ((recovery.bytes_per_second || 0) / 1e6).toFixed(2) + ' MB/s' : '—','所有文件与线程的正文发送速度合计');
   add('上传正文缓存',memory.limit_bytes ? ((memory.used_bytes || 0) / 1048576).toFixed(1) + ' / ' + (memory.limit_bytes / 1048576).toFixed(0) + ' MiB' : '—','峰值 ' + ((memory.peak_bytes || 0) / 1048576).toFixed(1) + ' MiB · 缓冲池 ' + ((memory.allocated_bytes || 0) / 1048576).toFixed(1) + ' MiB');

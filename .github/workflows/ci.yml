@@ -1,0 +1,37 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify vendored WebDAV patch
+        run: git apply --reverse --check third_party/webdav.patch
+      - name: Test without cloud accounts
+        run: go test -mod=vendor -count=1 -timeout=10m ./...
+      - name: Static analysis
+        run: go vet -mod=vendor ./...
+      - name: Race detection
+        if: runner.os == 'Linux'
+        run: go test -mod=vendor -race -count=1 -timeout=10m ./...
+      - name: Build Windows amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -mod=vendor -trimpath -o CloudProbe.exe .

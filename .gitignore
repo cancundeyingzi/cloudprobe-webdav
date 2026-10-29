@@ -14,7 +14,8 @@ coverage*
 /data/
 /user-data/
 /userdata/
-**/data/
+# Vendored packages can embed their own data directories.
+!vendor/**/data/
 **/user-data/
 **/userdata/
 **/original-sdk/

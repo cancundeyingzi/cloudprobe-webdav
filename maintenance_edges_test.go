@@ -182,7 +182,7 @@ func TestMaintenanceCommitRecoveryModes(t *testing.T) {
 	}
 }
 
-func TestMaintenanceConfirmedRejectionStillUsesOpenList(t *testing.T) {
+func TestMaintenanceConfirmedRejectionDoesNotUseOpenListForWrites(t *testing.T) {
 	cfg := defaultConfig("wopan")
 	cfg.Transport = "bridge"
 	cfg.Wopan.AccessToken = "fixture-token-012345678901234567"
@@ -200,11 +200,11 @@ func TestMaintenanceConfirmedRejectionStillUsesOpenList(t *testing.T) {
 	defer api.Close()
 	c, _ := newOpenListClient(openListInput{Enabled: true, Address: api.URL, Root: "/mount"})
 	b := &backupDAVDrive{primary: d, backup: c, root: "0", paths: map[string]string{"0": "", "f": "old.txt", "dest": "destination"}, entries: map[string]davEntry{}}
-	if e := b.Move(context.Background(), davEntry{Item: Item{ID: "f", Name: "old.txt"}}, "dest", "new.txt"); e != nil {
-		t.Fatal("confirmed pre-execution fallback no longer works", e)
+	if e := b.Move(context.Background(), davEntry{Item: Item{ID: "f", Name: "old.txt"}}, "dest", "new.txt"); e == nil {
+		t.Fatal("native rejection became success through unsafe OpenList fallback")
 	}
-	if writes.Load() != 2 {
-		t.Fatal("fallback rename/move not performed", writes.Load())
+	if writes.Load() != 0 {
+		t.Fatal("OpenList wrote without stable object identities", writes.Load())
 	}
 }
 

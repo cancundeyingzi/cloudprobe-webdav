@@ -620,8 +620,14 @@ func TestOpenListCredentialStorageDoesNotExposeTokens(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if bytes.Contains(raw, []byte(stored.Token)) || bytes.Contains(raw, []byte(stored.MetaPassword)) {
+	if localCredentialsEncrypted && (bytes.Contains(raw, []byte(stored.Token)) || bytes.Contains(raw, []byte(stored.MetaPassword))) {
 		t.Fatal("OpenList credential file is plaintext")
+	}
+	if !localCredentialsEncrypted {
+		fi, err := os.Stat(g.data + string(os.PathSeparator) + "openlist-config.bin")
+		if err != nil || fi.Mode().Perm()&0077 != 0 {
+			t.Fatal("unencrypted platform credentials must have private file permissions", err)
+		}
 	}
 	loaded, e := g.openListConfig("key", nil, "account")
 	if e != nil || loaded.Token != stored.Token || !loaded.Verified {
@@ -812,7 +818,7 @@ func newOpenListFixture(t *testing.T, drive *fakeDAVDrive) (*openListClient, *at
 	}
 	return client, &writes
 }
-func TestOpenListMappingVerificationAndAutomaticReadWriteFallback(t *testing.T) {
+func TestOpenListMappingVerificationAndReadOnlyFallback(t *testing.T) {
 	base := newFakeDAV(t)
 	api, writes := newOpenListFixture(t, base)
 	if e := verifyOpenList(context.Background(), base, "0", api, t.TempDir()); e != nil {
@@ -821,36 +827,39 @@ func TestOpenListMappingVerificationAndAutomaticReadWriteFallback(t *testing.T) 
 	if entries, _ := base.List(context.Background(), "0"); len(entries) != 0 {
 		t.Fatal("mapping proof not cleaned up")
 	}
-	primary := &failingBackupPrimary{fakeDAVDrive: base, failList: true, uploadError: &davNotExecuted{errors.New("500020001 rejected before execution")}, errorMutation: &davNotExecuted{errors.New("500020001 rejected before execution")}}
+	primary := &failingBackupPrimary{fakeDAVDrive: base, failList: true, uploadError: &davNotExecuted{errors.New("rejected before execution")}, errorMutation: &davNotExecuted{errors.New("rejected before execution")}}
 	b := &backupDAVDrive{primary: primary, backup: api, root: "0", paths: map[string]string{"0": ""}, entries: map[string]davEntry{}}
 	f, _ := os.CreateTemp(t.TempDir(), "body-*")
 	defer f.Close()
 	f.Write([]byte("ordinary non-video contents"))
-	entry, e := b.Upload(context.Background(), "0", "readme.txt", f)
-	if e != nil {
-		t.Fatal(e)
+	if _, err := base.Upload(context.Background(), "0", "readme.txt", f); err != nil {
+		t.Fatal(err)
 	}
 	items, e := b.List(context.Background(), "0")
 	if e != nil || len(items) != 1 || items[0].Name != "readme.txt" {
 		t.Fatal("list fallback", e)
 	}
+	entry := items[0]
 	r := newTransferReader(context.Background(), &davMount{drive: b}, entry, newTransferRuntime(transferOptions{}))
 	defer r.Close()
 	raw, e := io.ReadAll(r)
 	if e != nil || string(raw) != "ordinary non-video contents" {
 		t.Fatal("content fallback", e)
 	}
-	if e = b.Move(context.Background(), entry, "", "renamed.txt"); e != nil {
-		t.Fatal(e)
+	if _, err := b.Upload(context.Background(), "0", "another.txt", f); err == nil {
+		t.Fatal("native rejection allowed unsafe OpenList upload")
 	}
-	if e = b.Remove(context.Background(), entry); e != nil {
-		t.Fatal(e)
+	if e = b.Move(context.Background(), entry, "", "renamed.txt"); !errors.Is(e, errOpenListReadOnly) {
+		t.Fatal("path identity allowed rename", e)
 	}
-	if got, _ := base.List(context.Background(), "0"); len(got) != 0 {
-		t.Fatal("rename mapping removed wrong entry")
+	if e = b.Remove(context.Background(), entry); !errors.Is(e, errOpenListReadOnly) {
+		t.Fatal("path identity allowed remove", e)
 	}
-	if writes.Load() != 3 {
-		t.Fatal("unexpected API writes", writes.Load())
+	if got, _ := base.List(context.Background(), "0"); len(got) != 1 || got[0].Name != "readme.txt" {
+		t.Fatal("read-only fallback changed cloud data")
+	}
+	if writes.Load() != 0 {
+		t.Fatal("OpenList fallback performed writes", writes.Load())
 	}
 }
 func TestOpenListUnknownWriteOutcomeIsNotReplayed(t *testing.T) {

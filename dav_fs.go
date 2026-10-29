@@ -277,7 +277,7 @@ func (f *davFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error 
 		clean, _ := davPath(name)
 		s.created[clean] = created.ID
 	}
-	return f.verify(ctx, p.mount, p.entry.ID, base, -1)
+	return f.verify(ctx, p.mount, p.entry.ID, base, -1, created)
 }
 func (f *davFS) RemoveAll(ctx context.Context, name string) error {
 	release, e := f.reserve(ctx, name)
@@ -348,7 +348,7 @@ func (f *davFS) Rename(ctx context.Context, oldName, newName string) error {
 	if e != nil {
 		return davCloudError(ctx, e)
 	}
-	if e = f.verify(ctx, m, dst.entry.ID, base, -1); e != nil {
+	if e = f.verify(ctx, m, dst.entry.ID, base, -1, src.entry); e != nil {
 		return e
 	}
 	if s := davState(ctx); s != nil {
@@ -359,7 +359,7 @@ func (f *davFS) Rename(ctx context.Context, oldName, newName string) error {
 	}
 	return nil
 }
-func (f *davFS) verify(ctx context.Context, m *davMount, parent, name string, size int64) (err error) {
+func (f *davFS) verify(ctx context.Context, m *davMount, parent, name string, size int64, expected davEntry) (err error) {
 	finish := logPhase(ctx, "提交目录核验", "云盘目录接口", "检查目标名称、大小："+name)
 	defer func() { finish(err) }()
 	for attempt := 0; attempt < 5; attempt++ {
@@ -370,6 +370,9 @@ func (f *davFS) verify(ctx context.Context, m *davMount, parent, name string, si
 		}
 		for _, it := range a {
 			if it.Name == name && (size < 0 || it.Size == size) {
+				if !sameCloudObject(it, expected) {
+					return davCloudError(ctx, errors.New("目标名称已出现但对象身份不符，未确认操作成功"))
+				}
 				return nil
 			}
 		}

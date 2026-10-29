@@ -64,31 +64,42 @@ type runLogItem struct {
 	Kind      string `json:"kind,omitempty"`
 }
 type runtimeLog struct {
-	mu      sync.Mutex
-	file    *os.File
-	path    string
-	runID   string
-	seq     uint64
-	entries []runLogEntry
-	err     string
-	clean   func(string) string
+	mu                                     sync.Mutex
+	file                                   *os.File
+	path                                   string
+	runID                                  string
+	seq                                    uint64
+	entries                                []runLogEntry
+	err                                    string
+	clean                                  func(string) string
+	fileBytes, maxFileBytes, maxTotalBytes int64
+	maxFiles, segment                      int
+	segments                               []string
 }
 
 func newRuntimeLog(profile string, clean func(string) string) *runtimeLog {
 	id := time.Now().Format("20060102-150405") + "-" + randomKey()[:8]
 	l := &runtimeLog{runID: id, path: filepath.Join(profile, "run-logs", id+".jsonl"), clean: clean}
+	l.maxFileBytes, l.maxTotalBytes, l.maxFiles = 16<<20, 128<<20, 8
 	if e := os.MkdirAll(filepath.Dir(l.path), 0700); e != nil {
 		l.err = e.Error()
 	} else if f, e := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600); e != nil {
 		l.err = e.Error()
 	} else {
 		l.file = f
+		l.segments = []string{l.path}
+		if err := l.pruneLocked(); err != nil {
+			l.err = err.Error()
+		}
 	}
 	return l
 }
 func (l *runtimeLog) sanitize(s string) string {
 	if l.clean != nil {
 		s = l.clean(s)
+	}
+	if len(s) > 4096 {
+		s = s[:4096] + "…"
 	}
 	// Even opaque signatures in the URL path must not enter exported diagnostics.
 	s = urlPattern.ReplaceAllStringFunc(s, func(raw string) string {
@@ -117,6 +128,7 @@ func (l *runtimeLog) add(e runLogEntry) {
 	e.Endpoint = l.sanitize(e.Endpoint)
 	e.Detail = l.sanitize(e.Detail)
 	e.Error = l.sanitize(e.Error)
+	e.Items = append([]runLogItem(nil), e.Items[:min(100, len(e.Items))]...)
 	for i := range e.Items {
 		e.Items[i].Name = l.sanitize(e.Items[i].Name)
 	}
@@ -129,7 +141,17 @@ func (l *runtimeLog) add(e runLogEntry) {
 		l.entries = l.entries[len(l.entries)-800:]
 	}
 	if l.file != nil && l.err == "" {
-		if err := json.NewEncoder(l.file).Encode(e); err != nil {
+		data, err := json.Marshal(e)
+		data = append(data, '\n')
+		if err == nil && l.fileBytes+int64(len(data)) > l.maxFileBytes {
+			err = l.rotateLocked()
+		}
+		if err == nil {
+			var n int
+			n, err = l.file.Write(data)
+			l.fileBytes += int64(n)
+		}
+		if err != nil {
 			l.err = err.Error()
 		}
 	}
@@ -152,7 +174,7 @@ func (l *runtimeLog) status() map[string]any {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return map[string]any{"run_id": l.runID, "last_id": l.seq, "file": l.path, "error": l.err}
+	return map[string]any{"run_id": l.runID, "last_id": l.seq, "file": l.path, "error": l.err, "file_limit_bytes": l.maxFileBytes, "total_limit_bytes": l.maxTotalBytes, "retained_files": len(l.segments)}
 }
 
 type runTraceKey struct{}
@@ -275,19 +297,37 @@ func (g *guiApp) runLogAPI(w http.ResponseWriter, r *http.Request) {
 			g.fail(w, fmt.Errorf("运行日志文件不可用"))
 			return
 		}
-		fi, err := l.file.Stat()
-		if err != nil {
-			l.mu.Unlock()
-			g.fail(w, err)
-			return
+		var readers []io.Reader
+		var files []*os.File
+		var size int64
+		defer func() {
+			for _, f := range files {
+				_ = f.Close()
+			}
+		}()
+		for _, path := range l.segments {
+			f, err := os.Open(path)
+			if err != nil {
+				l.mu.Unlock()
+				g.fail(w, err)
+				return
+			}
+			files = append(files, f)
+			fi, err := f.Stat()
+			if err != nil {
+				l.mu.Unlock()
+				g.fail(w, err)
+				return
+			}
+			size += fi.Size()
+			readers = append(readers, io.NewSectionReader(f, 0, fi.Size()))
 		}
-		reader := io.NewSectionReader(l.file, 0, fi.Size())
 		name := "cloudprobe-run-" + l.runID + ".jsonl"
 		l.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
-		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
-		_, _ = io.Copy(w, reader)
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		_, _ = io.Copy(w, io.MultiReader(readers...))
 		return
 	}
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
