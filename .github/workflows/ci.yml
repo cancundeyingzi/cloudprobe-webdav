@@ -22,6 +22,9 @@ jobs:
           cache: false
       - name: Verify vendored WebDAV patch
         run: git apply --reverse --check third_party/webdav.patch
+      - name: Require unprivileged Linux test runner
+        if: runner.os == 'Linux'
+        run: test "$(id -u)" -ne 0
       - name: Test without cloud accounts
         run: go test -mod=vendor -count=1 -timeout=10m ./...
       - name: Static analysis

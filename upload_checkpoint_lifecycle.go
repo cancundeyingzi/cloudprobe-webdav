@@ -137,6 +137,21 @@ func (c *uploadCheckpoint) discard() error {
 	if c.closed {
 		return errCheckpointRetired
 	}
+	if err := c.cleanupSpool(""); err != nil {
+		return err
+	}
+	c.closed = true
+	c.retireActivityLocked()
+	if err := os.Remove(c.file); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// Caller owns the OS lease and exclusive access to this checkpoint (mu if
+// published). keep is the current request's body, which must not be deleted.
+// This routine never changes the persisted association, even on failure.
+func (c *uploadCheckpoint) cleanupSpool(keep string) error {
 	name := c.data.Spool
 	if name != "" {
 		if !strings.HasPrefix(name, "upload-") || len(name) <= len("upload-") || filepath.Base(name) != name || !filepath.IsLocal(name) || strings.ContainsAny(name, "/\\:\x00") {
@@ -155,15 +170,13 @@ func (c *uploadCheckpoint) discard() error {
 			if !info.Mode().IsRegular() {
 				return errors.New("关联暂存路径不是普通文件，保留记录等待核验")
 			}
+			if name == keep {
+				return nil
+			}
 			if err = root.Remove(name); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("清理关联正文失败，已保留续传记录：%w", err)
 			}
 		}
-	}
-	c.closed = true
-	c.retireActivityLocked()
-	if err := os.Remove(c.file); err != nil && !os.IsNotExist(err) {
-		return err
 	}
 	return nil
 }

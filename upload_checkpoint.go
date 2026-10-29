@@ -232,12 +232,12 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 			}
 			c.data.Stage = "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name)
 		}
-		if old := c.data.Spool; mode == "disk" && old != "" && old != filepath.Base(d.tmp.Name()) && filepath.Base(old) == old && strings.HasPrefix(old, "upload-") {
-			if e := os.Remove(filepath.Join(d.fs.spool, old)); e != nil && !os.IsNotExist(e) {
-				logDAV(d.ctx, runLogEntry{Operation: "清理旧上传暂存", Source: "本机", Result: "待清理", Error: e.Error()})
-			}
-		}
+
 		if mode == "disk" {
+			if err := c.cleanupSpool(filepath.Base(d.tmp.Name())); err != nil {
+				release()
+				return nil, nil, err
+			}
 			c.data.Spool = filepath.Base(d.tmp.Name())
 		}
 		if err := c.saveLocked(); err != nil {

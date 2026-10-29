@@ -321,10 +321,13 @@ func TestCheckpointQuarkReloadReusesSessionAndETags(t *testing.T) {
 
 func TestCheckpointDiskIdentityCorruptionAndLease(t *testing.T) {
 	_, drive := newQuarkFixture(t)
-	f, _ := os.CreateTemp(t.TempDir(), "body")
+	fs := &davFS{spool: t.TempDir()}
+	f, err := os.CreateTemp(fs.spool, "upload-*")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer f.Close()
 	f.WriteString("first-content")
-	fs := &davFS{spool: t.TempDir()}
 	d := &davFile{fs: fs, ctx: context.Background(), tmp: f, name: "/mount/name", node: davNode{mount: &davMount{Identity: "account", Provider: "quark", drive: drive}, parent: "0", entry: davEntry{Item: Item{Name: "name"}}}}
 	c, release, err := d.openCheckpoint()
 	if err != nil {
