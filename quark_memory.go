@@ -43,11 +43,18 @@ func planMemoryUpload(ctx context.Context, drive davDrive, parent, name string, 
 	if !ok {
 		return memoryUploadPlan{}, &memoryUnavailable{"此通道不支持纯内存上传"}
 	}
+	partSize := int64(options.UploadPartMiB) << 20
+	var saved struct{ PartSize int64 }
+	if found, err := checkpointFrom(ctx).session(&saved); err != nil {
+		return memoryUploadPlan{}, err
+	} else if found {
+		partSize = saved.PartSize
+	}
 	workers := 4
 	if native := nativeWopanDrive(drive); native != nil {
 		workers = uploadConcurrency(native.uploadConcurrency)
 	}
-	return memoryUploadPlan{partSize: int64(options.UploadPartMiB) << 20, workers: workers, run: func(ctx context.Context, source *memoryUploadSource) (davEntry, error) {
+	return memoryUploadPlan{partSize: partSize, workers: workers, run: func(ctx context.Context, source *memoryUploadSource) (davEntry, error) {
 		return stream.UploadStream(ctx, parent, name, size, source)
 	}}, nil
 }
@@ -59,7 +66,14 @@ func (d *quarkDAVDrive) planStream(ctx context.Context, parent, name string, siz
 			continue
 		} // This channel needs hashes in upload_pre.
 		u := &quarkUpload{drive: d, route: route, parent: parent, name: name, size: size, mime: contentType(name)}
-		if err := u.prepareSession(ctx); err != nil {
+		restored, prepareErr := u.restoreSession(ctx)
+		if prepareErr == nil && !restored {
+			prepareErr = u.prepareSession(ctx)
+		}
+		if prepareErr == nil && u.route == quarkOpen {
+			prepareErr = &memoryUnavailable{"旧会话需要预先完整散列，不能作为纯内存会话恢复"}
+		}
+		if err := prepareErr; err != nil {
 			if !quarkRejected(err) {
 				return memoryUploadPlan{}, &davMutationError{Phase: "夸克内存会话准备", Err: err}
 			}
@@ -67,6 +81,12 @@ func (d *quarkDAVDrive) planStream(ctx context.Context, parent, name string, siz
 			rejected = err
 			logFallback(ctx, route.label(), "其他原生内存上传通道", err)
 			continue
+		}
+		if u.completeFID != "" {
+			u.partSize = 1 << 20
+		}
+		if err := u.saveSession(ctx); err != nil {
+			return memoryUploadPlan{}, err
 		}
 		d.metadataHealth.good(string(route) + ":upload")
 		partSize := u.partSize
@@ -88,7 +108,10 @@ func (d *quarkDAVDrive) planStream(ctx context.Context, parent, name string, siz
 			}
 			var err error
 			if u.completeFID != "" {
-				err = u.beforeComplete(ctx)
+				err = source.drainCheckpoint(ctx)
+				if err == nil {
+					err = u.beforeComplete(ctx)
+				}
 			} else {
 				err = u.run(ctx, source)
 			}
@@ -100,7 +123,9 @@ func (d *quarkDAVDrive) planStream(ctx context.Context, parent, name string, siz
 				}
 				return davEntry{}, &davMutationError{Phase: "夸克内存上传", Err: err}
 			}
-			return d.verifyQuarkUpload(ctx, parent, name, size, u.completeFID, u.sha1, true)
+			// A prepare-time instant upload did not see this request's bytes.
+			// Require its content hash rather than trusting only its ID and size.
+			return d.verifyQuarkUpload(ctx, parent, name, size, u.completeFID, u.sha1, u.completeFID == "", u.md5)
 		}}, nil
 	}
 	return memoryUploadPlan{}, &memoryUnavailable{fmt.Sprintf("夸克原生内存通道不可用；开放平台需要完整预先散列：%v", rejected)}

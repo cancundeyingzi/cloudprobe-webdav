@@ -17,7 +17,7 @@ const transferFields = [
   ['upload_prefetch_mib','提前接收目标（MiB）',10,1,1024,1,'memory-fields']
 ];
 const transferModes = [
-  ['upload_storage_mode','上传缓存方式','memory',[['memory','严格纯内存（联通 / 夸克）'],['auto','内存优先 · 准备阶段不兼容时使用磁盘'],['disk','磁盘兼容 · 支持云端重启续传']],'memory-fields'],
+  ['upload_storage_mode','上传缓存方式','memory',[['memory','正文纯内存 · 保存续传状态（联通 / 夸克）'],['auto','内存优先 · 准备阶段不兼容时使用磁盘'],['disk','磁盘兼容 · 支持云端重启续传']],'memory-fields'],
   ['upload_recovery_mode','总体低速恢复','auto',[['auto','启用 · 所有上传统一暂停'],['off','关闭 · 保留故障重试']],'recovery-fields']
 ];
 function paintTransfers(d) {
@@ -136,7 +136,7 @@ async function refreshUploadResume() {
     host.replaceChildren();
     for (const task of data.tasks || []) {
       const row = document.createElement('div'), text = document.createElement('p');
-      text.textContent = (task.target || task.id) + ' · ' + task.state + ' · 云端已确认 ' + bytes(task.confirmed || 0) + ' / ' + bytes(task.size || 0);
+      text.textContent = (task.target || task.id) + ' · ' + (task.mode === 'memory' ? '正文纯内存' : '磁盘兼容') + ' · ' + task.state + ' · 云端已确认 ' + bytes(task.confirmed || 0) + ' / ' + bytes(task.size || 0);
       row.append(text);
       for (const [action,label] of [[task.paused ? 'resume' : 'pause',task.paused ? '继续' : '暂停'],['reset','放弃续传并重传']]) {
         const button = document.createElement('button'); button.className = 'small'; button.textContent = label;

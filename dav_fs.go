@@ -479,6 +479,7 @@ type davFile struct {
 	spoolWriteTime          time.Duration
 	memory                  *memoryUploadSource
 	uploadDone              chan memoryUploadResult
+	releaseCheckpoint       func()
 	original                *davEntry
 	committed               *davEntry
 }

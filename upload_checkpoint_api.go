@@ -96,6 +96,9 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 			if c.data.Paused {
 				state = "已暂停"
 			}
+			if c.data.Invalid && !c.data.Paused {
+				state = "内容或会话已变化，等待完整重传重建"
+			}
 			var session struct{ PartSize int64 }
 			_ = json.Unmarshal(c.data.Session, &session)
 			var confirmed int64
@@ -104,7 +107,7 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 					confirmed += max(int64(0), min(session.PartSize, c.data.Size-(index-1)*session.PartSize))
 				}
 			}
-			rows = append(rows, map[string]any{"id": key, "target": c.data.Target, "provider": c.data.Provider, "size": c.data.Size, "confirmed": confirmed, "parts": len(c.data.Parts), "state": state, "updated": c.data.Updated, "paused": c.data.Paused})
+			rows = append(rows, map[string]any{"id": key, "target": c.data.Target, "provider": c.data.Provider, "size": c.data.Size, "confirmed": confirmed, "parts": len(c.data.Parts), "state": state, "updated": c.data.Updated, "paused": c.data.Paused, "mode": c.data.Mode})
 			if ok {
 				c.mu.Unlock()
 			}

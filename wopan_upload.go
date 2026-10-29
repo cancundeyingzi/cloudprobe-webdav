@@ -189,13 +189,15 @@ func (u *wopanUploadSession) run(ctx context.Context, f io.ReaderAt) (string, er
 				if index > parts || workerCtx.Err() != nil {
 					return
 				}
-				value, reused := cp.part(index)
-				var err error
-				if reused {
+				off := (index - 1) * u.partSize
+				n := min(u.partSize, u.size-off)
+				value, reused, err := prepareCheckpointPart(workerCtx, f, index, off, n)
+				if err == nil && reused {
 					n := min(u.partSize, u.size-(index-1)*u.partSize)
 					confirmed.Add(n)
 					checkpointProgress(workerCtx, n, index)
-				} else {
+					releaseCheckpointPart(f, off, n)
+				} else if err == nil {
 					value, err = u.part(workerCtx, f, index, parts, workerID, pool, &sent, &confirmed, &retries)
 				}
 				mu.Lock()

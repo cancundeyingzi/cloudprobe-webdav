@@ -91,21 +91,27 @@ func (d *quarkDAVDrive) uploadFile(ctx context.Context, parent, name string, f *
 	}
 	return davEntry{}, &davNotExecuted{last}
 }
-func (u *quarkUpload) prepare(ctx context.Context) error {
+func (u *quarkUpload) restoreSession(ctx context.Context) (bool, error) {
 	cp := checkpointFrom(ctx)
 	var saved quarkCheckpointSession
 	if exists, err := cp.session(&saved); err != nil {
-		return err
+		return false, err
 	} else if exists {
-		if saved.Kind != "quark" || saved.Task == "" || saved.PartSize <= 0 || saved.PartSize > 256<<20 || (saved.Route != quarkDesktop && saved.Route != quarkWeb && saved.Route != quarkOpen) {
-			return errors.New("夸克续传会话无效")
+		if saved.Kind != "quark" || (saved.Task == "" && saved.CompleteFID == "") || saved.PartSize <= 0 || saved.PartSize > 256<<20 || (saved.Route != quarkDesktop && saved.Route != quarkWeb && saved.Route != quarkOpen) {
+			return false, errors.New("夸克续传会话无效")
 		}
-		if saved.Route != quarkOpen && (saved.UploadID == "" || u.drive.client.validBodyURL(saved.Base) != nil) {
-			return errors.New("夸克 OSS 续传地址无效")
+		if saved.CompleteFID == "" && saved.Route != quarkOpen && (saved.UploadID == "" || u.drive.client.validBodyURL(saved.Base) != nil) {
+			return false, errors.New("夸克 OSS 续传地址无效")
 		}
 		u.route, u.task, u.uploadID, u.bucket, u.key, u.base, u.completeFID = saved.Route, saved.Task, saved.UploadID, saved.Bucket, saved.Key, saved.Base, saved.CompleteFID
 		u.auth, u.callback, u.partSize = saved.Auth, saved.Callback, saved.PartSize
-		return nil
+		return true, nil
+	}
+	return false, nil
+}
+func (u *quarkUpload) prepare(ctx context.Context) error {
+	if found, err := u.restoreSession(ctx); found || err != nil {
+		return err
 	}
 	if err := u.prepareSession(ctx); err != nil {
 		return err
@@ -118,7 +124,11 @@ func (u *quarkUpload) prepare(ctx context.Context) error {
 	if u.completeFID != "" {
 		return nil
 	}
-	return cp.setSession(quarkCheckpointSession{Kind: "quark", Route: u.route, Task: u.task, UploadID: u.uploadID, Bucket: u.bucket, Key: u.key, Base: u.base, Auth: u.auth, Callback: u.callback, PartSize: u.partSize})
+	return u.saveSession(ctx)
+}
+
+func (u *quarkUpload) saveSession(ctx context.Context) error {
+	return checkpointFrom(ctx).setSession(quarkCheckpointSession{Kind: "quark", Route: u.route, Task: u.task, UploadID: u.uploadID, Bucket: u.bucket, Key: u.key, Base: u.base, Auth: u.auth, Callback: u.callback, PartSize: u.partSize, CompleteFID: u.completeFID})
 }
 
 func (u *quarkUpload) prepareSession(ctx context.Context) error {
@@ -315,12 +325,11 @@ func (u *quarkUpload) run(ctx context.Context, source io.ReaderAt) error {
 			for index := range jobs {
 				off := (index - 1) * u.partSize
 				n := min(u.partSize, u.size-off)
-				tag, reused := checkpointFrom(ctx).part(index)
-				var err error
-				if reused {
+				tag, reused, err := prepareCheckpointPart(ctx, source, index, off, n)
+				if err == nil && reused {
 					confirmed.Add(n)
 					checkpointProgress(ctx, n, index)
-				} else {
+				} else if err == nil {
 					tag, err = u.part(ctx, source, index, parts, off, n, &sent, &confirmed)
 					if err == nil {
 						err = checkpointFrom(ctx).confirm(index, tag)
@@ -336,6 +345,7 @@ func (u *quarkUpload) run(ctx context.Context, source io.ReaderAt) error {
 					return
 				}
 				etags[index-1] = tag
+				releaseCheckpointPart(source, off, n)
 			}
 		})
 	}
@@ -489,9 +499,6 @@ func (u *quarkUpload) part(ctx context.Context, source io.ReaderAt, index, parts
 			}
 			entry := runLogEntry{Operation: "上传分片", Source: u.route.label(), Endpoint: nodeHost(raw), Part: index, Parts: parts, Attempt: attempt, Bytes: n, SentBytes: local.Load(), DurationMs: time.Since(start).Milliseconds(), HTTPStatus: status, Result: "已确认"}
 			if err == nil {
-				if source, ok := source.(interface{ ConfirmPart(int64, int64) }); ok {
-					source.ConfirmPart(off, n)
-				}
 				confirmed.Add(n)
 				entry.ConfirmedBytes = confirmed.Load()
 				if trace, _ := ctx.Value(runTraceKey{}).(*runTrace); trace != nil {

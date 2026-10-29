@@ -34,6 +34,9 @@ type uploadCheckpointData struct {
 	OriginalVersion string           `json:"original_version,omitempty"`
 	UploadedVersion string           `json:"uploaded_version,omitempty"`
 	Spool           string           `json:"spool,omitempty"`
+	Mode            string           `json:"mode,omitempty"`
+	Hashes          map[int64]string `json:"part_hashes"`
+	Invalid         bool             `json:"invalid,omitempty"`
 }
 type uploadCheckpoint struct {
 	mu   sync.Mutex
@@ -101,6 +104,9 @@ func (c *uploadCheckpoint) confirm(index int64, tag string) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.data.Invalid {
+		return errors.New("续传会话已失效，停止确认分片")
+	}
 	c.data.Parts[index] = tag
 	if err := c.saveLocked(); err != nil {
 		delete(c.data.Parts, index)
@@ -134,8 +140,16 @@ func (d *davFile) openCheckpoint() (*uploadCheckpoint, func(), error) {
 	if _, err := copyWithContext(d.ctx, h, io.NewSectionReader(d.tmp, 0, fiSize(d.tmp))); err != nil {
 		return nil, nil, err
 	}
+	return d.openCheckpointFor(hex.EncodeToString(h.Sum(nil)), fiSize(d.tmp), "disk")
+}
+
+func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (*uploadCheckpoint, func(), error) {
+	m := d.node.mount
+	if m.Identity == "" || !resumableDrive(m.drive) {
+		return nil, func() {}, nil
+	}
 	// Account, cloud parent, target and original version isolate independent jobs.
-	keyBytes, _ := json.Marshal([]string{m.Provider, m.Identity, d.node.parent, d.node.entry.Name, hex.EncodeToString(h.Sum(nil))})
+	keyBytes, _ := json.Marshal([]string{m.Provider, m.Identity, d.node.parent, d.node.entry.Name, signature})
 	keyHash := sha256.Sum256(keyBytes)
 	key := hex.EncodeToString(keyHash[:])
 	dir := filepath.Join(d.fs.spool, "resume")
@@ -162,21 +176,43 @@ func (d *davFile) openCheckpoint() (*uploadCheckpoint, func(), error) {
 			release()
 			return nil, nil, e
 		}
-		if json.Unmarshal(plain, &c.data) != nil || c.data.Version != 1 || c.data.Key != key || c.data.Size != fiSize(d.tmp) || c.data.Parts == nil || !strings.HasPrefix(c.data.Stage, "CloudProbe-upload-") || safeFilename(c.data.Stage) != nil {
+		if json.Unmarshal(plain, &c.data) != nil || c.data.Version != 1 || c.data.Key != key || c.data.Size != size || c.data.Parts == nil || !strings.HasPrefix(c.data.Stage, "CloudProbe-upload-") || safeFilename(c.data.Stage) != nil {
 			release()
 			return nil, nil, errors.New("续传记录校验失败，已保留原文件")
 		}
 		c.restoreVersions()
+		if mode == "memory" && (c.data.Mode != "memory" || c.data.Hashes == nil) {
+			release()
+			return nil, nil, errors.New("内存续传记录缺少分片指纹，拒绝复用")
+		}
+		if mode == "memory" && c.data.Invalid && !c.data.Paused {
+			c.data.Session = nil
+			c.data.Parts = map[int64]string{}
+			c.data.Hashes = map[int64]string{}
+			c.data.Uploaded = nil
+			c.data.UploadedVersion = ""
+			c.data.Backup = ""
+			c.data.Original = d.original
+			c.data.OriginalVersion = ""
+			if d.original != nil {
+				c.data.OriginalVersion = d.original.ContentVersion
+			}
+			c.data.Stage = "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name)
+			c.data.Invalid = false
+		}
+
 		if c.data.Paused {
 			release()
 			return nil, nil, davLocalError(d.ctx, 423, "云端续传任务已暂停，请在管理界面继续")
 		}
-		if old := c.data.Spool; old != "" && old != filepath.Base(d.tmp.Name()) && filepath.Base(old) == old && strings.HasPrefix(old, "upload-") {
+		if old := c.data.Spool; mode == "disk" && old != "" && old != filepath.Base(d.tmp.Name()) && filepath.Base(old) == old && strings.HasPrefix(old, "upload-") {
 			if e := os.Remove(filepath.Join(d.fs.spool, old)); e != nil && !os.IsNotExist(e) {
 				logDAV(d.ctx, runLogEntry{Operation: "清理旧上传暂存", Source: "本机", Result: "待清理", Error: e.Error()})
 			}
 		}
-		c.data.Spool = filepath.Base(d.tmp.Name())
+		if mode == "disk" {
+			c.data.Spool = filepath.Base(d.tmp.Name())
+		}
 		if err := c.saveLocked(); err != nil {
 			release()
 			return nil, nil, err
@@ -208,8 +244,10 @@ func (d *davFile) openCheckpoint() (*uploadCheckpoint, func(), error) {
 		release()
 		return nil, nil, errors.New("未完成续传任务达到 256 个上限，请先处理或清理旧任务")
 	}
-	c.data = uploadCheckpointData{Version: 1, Key: key, Size: fiSize(d.tmp), Stage: "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name), Parts: map[int64]string{}, Original: d.original, Target: d.name, Provider: m.Provider}
-	c.data.Spool = filepath.Base(d.tmp.Name())
+	c.data = uploadCheckpointData{Version: 1, Key: key, Size: size, Mode: mode, Hashes: map[int64]string{}, Stage: "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name), Parts: map[int64]string{}, Original: d.original, Target: d.name, Provider: m.Provider}
+	if mode == "disk" {
+		c.data.Spool = filepath.Base(d.tmp.Name())
+	}
 	if d.original != nil {
 		c.data.OriginalVersion = d.original.ContentVersion
 	}
