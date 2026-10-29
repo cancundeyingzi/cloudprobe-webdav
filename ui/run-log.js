@@ -2,7 +2,11 @@ let runRows = [], runAfter = 0, runID = '', runLoading = false, runGap = false;
 function logBytes(n) { return n ? bytes(n) : '0 B'; }
 
 async function pollRunLog(meta) {
-  $('run-file').textContent = meta.file ? '本机日志：' + meta.file + (meta.error ? '；写入失败：' + meta.error : '；页面保留最近 800 条，导出包含本次运行的全部记录。') : '';
+  const diskState = meta.error ? '；写入失败：' + meta.error : meta.disk_paused ? '；磁盘记录已暂停，正在重试日志清理。' : '；页面保留最近 800 条，导出包含本次运行仍保留的日志。';
+  const retentionState = meta.retention_error ? '；清理提示：' + meta.retention_error : '';
+  const droppedState = meta.dropped_entries ? '；本次有 ' + meta.dropped_entries + ' 条记录未写入磁盘。' : '';
+  const exportState = meta.export_error ? '；导出提示：' + meta.export_error : '';
+  $('run-file').textContent = meta.file ? '本机日志：' + meta.file + diskState + retentionState + droppedState + exportState : '';
   if (!meta.run_id || runLoading) return;
   if (runID !== meta.run_id) { runID = meta.run_id; runAfter = 0; runRows = []; runGap = false; }
   if (runAfter >= meta.last_id) return;

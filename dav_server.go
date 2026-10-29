@@ -666,11 +666,9 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, name := range writeTargets {
 			if err := s.fs.checkNativeWrite(r.Context(), name); err != nil {
-				var statusErr *davStatusError
-				if errors.As(err, &statusErr) {
-					http.Error(rw, s.safeError(err), statusErr.Code)
-					return
-				}
+				failure := davWriteCheckFailure(r.Context(), name, err)
+				http.Error(rw, s.safeError(failure), failure.Code)
+				return
 			}
 		}
 		if !s.preconditions(rw, r, source) {
@@ -770,7 +768,7 @@ func (w *davResponse) WriteHeader(code int) {
 		finish := w.state.finish
 		w.state.finish = nil
 		if e := finish(code >= 200 && code < 300 && w.state.err == nil && !w.state.aborted); e != nil {
-			w.state.err = &davUpstreamError{Message: e.Error()}
+			w.state.err = &davUpstreamError{Message: e.Error(), Err: e}
 		}
 	}
 	if w.state.err != nil {

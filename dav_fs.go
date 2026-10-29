@@ -109,7 +109,7 @@ func davCloudError(ctx context.Context, e error) error {
 	if e == nil {
 		return nil
 	}
-	v := &davUpstreamError{Message: e.Error()}
+	v := &davUpstreamError{Message: e.Error(), Err: e}
 	if s := davState(ctx); s != nil {
 		s.err = v
 	}

@@ -36,9 +36,11 @@ func (m *contextMutex) Unlock() { <-m.gate }
 type davStatusError struct {
 	Code    int
 	Message string
+	Err     error
 }
 
 func (e *davStatusError) Error() string { return e.Message }
+func (e *davStatusError) Unwrap() error { return e.Err }
 func davLocalError(ctx context.Context, code int, message string) error {
 	err := &davStatusError{Code: code, Message: message}
 	if state := davState(ctx); state != nil {

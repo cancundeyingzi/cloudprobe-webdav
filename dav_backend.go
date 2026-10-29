@@ -41,9 +41,13 @@ type davDrive interface {
 	Move(context.Context, davEntry, string, string) error
 }
 
-type davUpstreamError struct{ Message string }
+type davUpstreamError struct {
+	Message string
+	Err     error
+}
 
 func (e *davUpstreamError) Error() string { return e.Message }
+func (e *davUpstreamError) Unwrap() error { return e.Err }
 
 type davNotExecuted struct{ error }
 
