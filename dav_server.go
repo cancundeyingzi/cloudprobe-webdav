@@ -78,6 +78,7 @@ type davActivity struct {
 	Error          string `json:"error,omitempty"`
 }
 type davManager struct {
+	controlMu sync.RWMutex
 	mu        sync.Mutex
 	app       *guiApp
 	server    *http.Server
@@ -146,6 +147,8 @@ func (d *davManager) Stop() {
 	if d == nil {
 		return
 	}
+	d.controlMu.Lock()
+	defer d.controlMu.Unlock()
 	d.mu.Lock()
 	s, c := d.server, d.cancel
 	d.server = nil
@@ -162,6 +165,8 @@ func (d *davManager) Stop() {
 	}
 }
 func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]any, error) {
+	d.controlMu.Lock()
+	defer d.controlMu.Unlock()
 	d.mu.Lock()
 	previous := d.config
 	running := d.server != nil

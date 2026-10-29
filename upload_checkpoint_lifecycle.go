@@ -137,6 +137,9 @@ func (c *uploadCheckpoint) discard() error {
 	if c.closed {
 		return errCheckpointRetired
 	}
+	if c.hasCloudState() && !c.cloudSettled {
+		return errors.New("云端事务尚未核验，保留恢复记录")
+	}
 	if err := c.cleanupSpool(""); err != nil {
 		return err
 	}
@@ -152,12 +155,15 @@ func (c *uploadCheckpoint) discard() error {
 // published). keep is the current request's body, which must not be deleted.
 // This routine never changes the persisted association, even on failure.
 func (c *uploadCheckpoint) cleanupSpool(keep string) error {
-	name := c.data.Spool
+	return cleanupRegisteredSpool(filepath.Dir(filepath.Dir(c.file)), c.data.Spool, keep)
+}
+
+func removeSpoolBody(dir, name, keep string) error {
 	if name != "" {
-		if !strings.HasPrefix(name, "upload-") || len(name) <= len("upload-") || filepath.Base(name) != name || !filepath.IsLocal(name) || strings.ContainsAny(name, "/\\:\x00") {
+		if !validSpoolName(name) {
 			return errors.New("续传记录的暂存文件名无效，保留记录等待核验")
 		}
-		root, err := os.OpenRoot(filepath.Dir(filepath.Dir(c.file)))
+		root, err := os.OpenRoot(dir)
 		if err != nil {
 			return err
 		}
@@ -179,4 +185,8 @@ func (c *uploadCheckpoint) cleanupSpool(keep string) error {
 		}
 	}
 	return nil
+}
+
+func validSpoolName(name string) bool {
+	return strings.HasPrefix(name, "upload-") && len(name) > len("upload-") && filepath.Base(name) == name && filepath.IsLocal(name) && !strings.ContainsAny(name, "/\\:\x00")
 }

@@ -241,10 +241,7 @@ func TestWebDAVRejectedUploadPreservesOriginal(t *testing.T) {
 	if string(b) != "keep original" {
 		t.Fatal("original was changed by failed upload")
 	}
-	files, _ := os.ReadDir(fs.spool)
-	if len(files) != 0 {
-		t.Fatal("local spool was not removed")
-	}
+	assertNoRequestBody(t, fs.spool)
 }
 
 type failingDAVBody struct{ read bool }
@@ -273,9 +270,21 @@ func TestWebDAVInterruptedUploadNeverCommits(t *testing.T) {
 	if len(a) != 0 {
 		t.Fatal("incomplete data reached cloud")
 	}
-	files, _ := os.ReadDir(fs.spool)
-	if len(files) != 0 {
-		t.Fatal("spool leaked")
+	assertNoRequestBody(t, fs.spool)
+}
+
+func assertNoRequestBody(t *testing.T, dir string) {
+	t.Helper()
+	bodies, err := filepath.Glob(filepath.Join(dir, "upload-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners, err := filepath.Glob(filepath.Join(dir, "owners", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 0 || len(owners) != 0 {
+		t.Fatal("request body or pending owner leaked", bodies, owners)
 	}
 }
 func TestWebDAVAuthenticationReadOnlyAndBoundaries(t *testing.T) {

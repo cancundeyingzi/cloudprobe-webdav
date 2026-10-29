@@ -39,7 +39,7 @@ func assertMemoryMetadataOnly(t *testing.T, spool string, body []byte) {
 		if d.IsDir() {
 			return nil
 		}
-		if filepath.Base(filepath.Dir(path)) != "resume" {
+		if filepath.Dir(path) != filepath.Join(spool, "resume") && filepath.Dir(path) != filepath.Join(spool, "resume", "history") {
 			t.Errorf("body spool created: %s", path)
 		}
 		if !strings.HasSuffix(d.Name(), ".bin") && !strings.HasPrefix(d.Name(), "lease-") && d.Name() != "catalog-lease" {

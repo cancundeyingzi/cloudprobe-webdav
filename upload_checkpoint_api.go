@@ -185,7 +185,10 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 		c, err = readUploadCheckpoint(file)
 		if err == nil {
 			if input.Action == "reset" {
-				err = c.discard()
+				err = g.retireCheckpointCloud(r.Context(), c)
+				if err == nil {
+					err = c.discard()
+				}
 			} else {
 				c.data.Paused = input.Action == "pause"
 				err = c.saveLocked()

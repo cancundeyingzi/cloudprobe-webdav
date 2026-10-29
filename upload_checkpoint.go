@@ -37,14 +37,18 @@ type uploadCheckpointData struct {
 	Mode            string           `json:"mode,omitempty"`
 	Hashes          map[int64]string `json:"part_hashes"`
 	Invalid         bool             `json:"invalid,omitempty"`
+	Account         string           `json:"account_identity,omitempty"`
+	Parent          string           `json:"parent_id,omitempty"`
+	TargetName      string           `json:"target_name,omitempty"`
 }
 type uploadCheckpoint struct {
-	mu          sync.Mutex
-	file        string
-	data        uploadCheckpointData
-	closed      bool
-	provisional bool
-	activity    *activeCheckpoint
+	mu           sync.Mutex
+	file         string
+	data         uploadCheckpointData
+	closed       bool
+	provisional  bool
+	activity     *activeCheckpoint
+	cloudSettled bool
 }
 type uploadCheckpointKey struct{}
 
@@ -191,11 +195,36 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 			return nil, nil, errors.New("续传记录校验失败，已保留原文件")
 		}
 		c.restoreVersions()
+		if c.data.Account != "" && (c.data.Account != m.Identity || c.data.Parent != d.node.parent || c.data.TargetName != d.node.entry.Name) {
+			release()
+			return nil, nil, errors.New("续传任务资源身份不一致，保留记录")
+		}
+		c.data.Account = m.Identity
+		c.data.Parent = d.node.parent
+		c.data.TargetName = d.node.entry.Name
+		c.data.Target = d.name
 		if mode == "memory" && (c.data.Mode != "memory" || c.data.Hashes == nil) {
 			release()
 			return nil, nil, errors.New("内存续传记录缺少分片指纹，拒绝复用")
 		}
 		if mode == "memory" && c.data.Invalid && !c.data.Paused {
+			if err := c.retireCloud(d.ctx, m, d.node.parent, d.node.entry.Name); err != nil {
+				release()
+				return nil, nil, err
+			}
+			// Reconciliation may have restored the old target or found an already
+			// committed one. Bind the new generation to that freshly checked state.
+			d.fs.invalidate(m)
+			current, lookupErr := d.fs.lookup(d.ctx, d.name)
+			if lookupErr != nil && !os.IsNotExist(lookupErr) {
+				release()
+				return nil, nil, lookupErr
+			}
+			d.original = nil
+			if lookupErr == nil {
+				copy := current.entry
+				d.original = &copy
+			}
 			c.data.Session = nil
 			c.data.Parts = map[int64]string{}
 			c.data.Hashes = map[int64]string{}
@@ -209,6 +238,7 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 			}
 			c.data.Stage = "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name)
 			c.data.Invalid = false
+			c.cloudSettled = false
 		}
 
 		if c.data.Paused {
@@ -251,7 +281,7 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 		return nil, nil, err
 	}
 	c.provisional = true
-	c.data = uploadCheckpointData{Version: 1, Key: key, Size: size, Mode: mode, Hashes: map[int64]string{}, Stage: "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name), Parts: map[int64]string{}, Original: d.original, Target: d.name, Provider: m.Provider}
+	c.data = uploadCheckpointData{Version: 1, Key: key, Size: size, Mode: mode, Hashes: map[int64]string{}, Stage: "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name), Parts: map[int64]string{}, Original: d.original, Target: d.name, Provider: m.Provider, Account: m.Identity, Parent: d.node.parent, TargetName: d.node.entry.Name}
 	if mode == "disk" {
 		c.data.Spool = filepath.Base(d.tmp.Name())
 	}
@@ -412,5 +442,5 @@ func (c *uploadCheckpoint) restoreVersions() {
 func sameCheckpointObject(a, b davEntry) bool {
 	x, _ := (davInfo{a}).ETag(context.Background())
 	y, _ := (davInfo{b}).ETag(context.Background())
-	return sameCloudObject(a, b) && x == y
+	return a.Directory == b.Directory && sameCloudObject(a, b) && x == y
 }

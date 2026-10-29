@@ -142,7 +142,7 @@ async function refreshUploadResume() {
       for (const [action,label] of actions) {
         const button = document.createElement('button'); button.className = 'small'; button.textContent = label;
         button.onclick = async () => {
-          if (action === 'reset' && !confirm('清理该任务关联的本地暂存正文并删除续传记录？下次将重新上传公网正文，云端临时文件不会自动删除。')) return;
+          if (action === 'reset' && !confirm('先核验旧云端事务、必要时恢复原目标，再清理关联本地正文并放弃任务？未确认的云端会话将保留在历史记录。')) return;
           if (action === 'forget' && !confirm('仅移除损坏记录？程序无法确定其关联正文，本地残留可能需要手动清理。')) return;
           button.disabled = true;
           try { await api('upload-resume',{id:task.id,action}); await refreshUploadResume(); }
@@ -156,3 +156,41 @@ async function refreshUploadResume() {
   } catch (e) { host.textContent = '读取续传任务失败：' + e.message; }
 }
 $('resume-refresh').onclick = refreshUploadResume;
+
+async function refreshSpoolCleanup() {
+  const host = $('spool-tasks');
+  try {
+    const data = await api('upload-spool',null,'GET'); host.replaceChildren();
+    for (const body of data.bodies || []) {
+      const row = document.createElement('div'), text = document.createElement('p');
+      text.style.overflowWrap = 'anywhere';
+      text.textContent = (body.target || body.id) + ' · ' + body.state + ' · ' + bytes(body.size || 0); row.append(text);
+      if (!body.busy) {
+        const button = document.createElement('button');button.className = 'small';button.textContent = '重试清理本地正文';
+        button.onclick = async () => { button.disabled = true;try {await api('upload-spool',{id:body.id});await refreshSpoolCleanup();} catch(e) {notice(e.message);button.disabled=false;} };
+        row.append(button);
+      }
+      host.append(row);
+    }
+    if (!host.childNodes.length) host.textContent = '没有待清理的本地正文。';
+  } catch(e) {host.textContent = '读取清理记录失败：' + e.message;}
+}
+async function refreshCheckpointHistory() {
+  const host = $('history-tasks');
+  try {
+    const data = await api('upload-history',null,'GET');host.replaceChildren();
+    for (const task of data.history || []) {
+      const row = document.createElement('div'), text = document.createElement('p');text.style.overflowWrap='anywhere';
+      text.textContent = (task.target || task.id) + ' · ' + task.state + ' · 临时对象：' + (task.stage || '无') + ' · 备份：' + (task.backup || '无');row.append(text);
+      if (task.busy) {host.append(row);continue;}
+      const button = document.createElement('button');button.className='small';button.textContent='确认已处理并移除记录';
+      button.onclick = async () => {
+        if (!confirm('确认关联云端对象已处理或无需继续跟踪？这里只移除本机历史，不执行云端删除。')) return;
+        button.disabled=true;try {await api('upload-history',{id:task.id,reviewed:true});await refreshCheckpointHistory();}catch(e){notice(e.message);button.disabled=false;}
+      };row.append(button);host.append(row);
+    }
+    if (!host.childNodes.length) host.textContent='没有旧云端事务记录。';
+  } catch(e) {host.textContent='读取旧事务失败：'+e.message;}
+}
+$('spool-refresh').onclick=refreshSpoolCleanup;
+$('history-refresh').onclick=refreshCheckpointHistory;

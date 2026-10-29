@@ -46,6 +46,9 @@ func (f *davFS) openMemoryFile(ctx context.Context, name string, parent davNode,
 		d.ctx = ctx
 		stageName = cp.data.Stage
 		if cp.data.Uploaded == nil {
+			d.original = cp.data.Original
+		}
+		if cp.data.Uploaded == nil {
 			if err = d.checkUploadTarget(cp.data.Original); err != nil {
 				return nil, err
 			}

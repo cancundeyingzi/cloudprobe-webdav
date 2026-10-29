@@ -435,12 +435,12 @@ func (f *davFS) OpenFile(ctx context.Context, name string, flag int, perm os.Fil
 		if e = os.MkdirAll(f.spool, 0700); e != nil {
 			return nil, e
 		}
-		tmp, e := os.CreateTemp(f.spool, "upload-*")
+		tmp, owner, e := newOwnedSpool(ctx, f.spool, name)
 		if e != nil {
 			return nil, e
 		}
 		clean, _ := davPath(name)
-		return &davFile{fs: f, ctx: scopedDAV(ctx, p.mount, clean), name: clean, node: davNode{mount: p.mount, parent: p.entry.ID, entry: davEntry{Item: Item{Name: base}, Modified: time.Now()}}, original: old, tmp: tmp, writing: true, spoolStarted: time.Now()}, nil
+		return &davFile{fs: f, ctx: scopedDAV(ctx, p.mount, clean), name: clean, node: davNode{mount: p.mount, parent: p.entry.ID, entry: davEntry{Item: Item{Name: base}, Modified: time.Now()}}, original: old, tmp: tmp, spoolOwner: owner, writing: true, spoolStarted: time.Now()}, nil
 	}
 	n, e := f.lookup(ctx, name)
 	if e != nil {
@@ -474,6 +474,7 @@ type davFile struct {
 	remote                  transferReadCloser
 	writing, closed, failed bool
 	readPos                 int
+	spoolOwner              *spoolOwner
 	spoolStarted            time.Time
 	spoolBytes              int64
 	spoolWriteTime          time.Duration
@@ -606,12 +607,30 @@ func (d *davFile) Close() (err error) {
 	if d.tmp == nil {
 		return nil
 	}
-	defer os.Remove(d.tmp.Name())
-	defer d.tmp.Close()
+	var cp *uploadCheckpoint
+	var releaseCheckpoint func()
+	committed := false
+	defer func() {
+		cleanupErr := d.finishSpool()
+		if cleanupErr != nil {
+			logDAV(d.ctx, runLogEntry{Operation: "本地正文清理", Source: "本机", Result: "待清理", Error: cleanupErr.Error(), Detail: "独立正文清理记录已保留，可在管理界面重试"})
+			if err != nil {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+		if committed && cp != nil {
+			if cleanup := cp.complete(); cleanup != nil {
+				logDAV(d.ctx, runLogEntry{Operation: "清理续传记录", Source: "本机", Result: "待清理", Error: cleanup.Error()})
+			}
+		}
+		if releaseCheckpoint != nil {
+			releaseCheckpoint()
+		}
+	}()
 	logDAV(d.ctx, runLogEntry{Operation: "本地暂存", Source: "本机磁盘", Result: "写入结束", Bytes: d.spoolBytes, DurationMs: time.Since(d.spoolStarted).Milliseconds(), DiskWriteMs: d.spoolWriteTime.Milliseconds(), Detail: "阶段耗时含客户端收包；磁盘实际 Write 累计耗时单独记录"})
 	s := davState(d.ctx)
 	if d.failed || d.ctx.Err() != nil || (s != nil && (s.aborted || s.err != nil || (s.method == "PUT" && s.contentLength >= 0 && s.bodyBytes != s.contentLength))) {
-		return errors.New("上传未完整接收，已丢弃本次暂存内容")
+		return errors.New("上传未完整接收，未提交云端目标；暂存正文交由终结清理")
 	}
 	flush := logPhase(d.ctx, "暂存落盘", "本机磁盘", "Sync 暂存文件")
 	if e := d.tmp.Sync(); e != nil {
@@ -629,11 +648,10 @@ func (d *davFile) Close() (err error) {
 	if e := d.checkUploadTarget(d.original); e != nil {
 		return e
 	}
-	cp, releaseCheckpoint, e := d.openCheckpoint()
+	cp, releaseCheckpoint, e = d.openCheckpoint()
 	if e != nil {
 		return davCloudError(d.ctx, e)
 	}
-	defer releaseCheckpoint()
 	created, e := d.uploadWithCheckpoint(cp)
 	f.invalidate(m)
 	if e != nil {
@@ -642,11 +660,7 @@ func (d *davFile) Close() (err error) {
 	if d.committed == nil {
 		err = d.commitUpload(created, fiSize(d.tmp), d.original)
 	}
-	if err == nil && cp != nil {
-		if cleanup := cp.complete(); cleanup != nil {
-			logDAV(d.ctx, runLogEntry{Operation: "清理续传记录", Source: "本机", Result: "待清理", Error: cleanup.Error()})
-		}
-	}
+	committed = err == nil
 	return err
 }
 
