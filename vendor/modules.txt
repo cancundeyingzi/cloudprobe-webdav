@@ -1,0 +1,18 @@
+# github.com/OpenListTeam/wopan-sdk-go v0.2.2
+## explicit; go 1.21
+github.com/OpenListTeam/wopan-sdk-go
+# golang.org/x/net v0.61.0
+## explicit; go 1.26.0
+golang.org/x/net/publicsuffix
+golang.org/x/net/webdav
+golang.org/x/net/webdav/internal/xml
+golang.org/x/net/websocket
+# resty.dev/v3 v3.0.0-beta.3
+## explicit; go 1.21
+resty.dev/v3
+
+# github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+## explicit
+github.com/skip2/go-qrcode
+github.com/skip2/go-qrcode/bitset
+github.com/skip2/go-qrcode/reedsolomon

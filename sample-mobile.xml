@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<result resultCode="0"><getDiskResult><isCompleted>1</isCompleted><contentList length="3">
+<contentInfo><contentID>video-1</contentID><contentName>电影.mkv</contentName><contentSuffix>mkv</contentSuffix><contentSize>9000</contentSize></contentInfo>
+<contentInfo><contentID>subtitle-1</contentID><contentName>电影.srt</contentName><contentSuffix>srt</contentSuffix><contentSize>120</contentSize></contentInfo>
+<contentInfo><contentID>text-1</contentID><contentName>说明.txt</contentName><contentSuffix>txt</contentSuffix><contentSize>90</contentSize></contentInfo>
+</contentList></getDiskResult></result>

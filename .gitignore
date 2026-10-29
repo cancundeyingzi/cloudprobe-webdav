@@ -1,0 +1,34 @@
+# Go and generated .NET bridge outputs
+/work/
+/bridge/build/
+/bin/
+/obj/
+*.exe
+*.dll
+*.pdb
+*.test
+*.out
+coverage*
+
+# Local profiles, caches, upload spools, and runtime logs
+/data/
+/user-data/
+/userdata/
+**/data/
+**/user-data/
+**/userdata/
+**/original-sdk/
+**/official-quark-browser/
+**/official-wopan-browser/
+**/run-logs/
+**/webdav-spool/
+**/quark-accounts.bin
+**/webdav-credentials.bin
+**/openlist-config.bin
+**/webdav.json
+**/*.log
+**/*.log.*
+
+# Editor/OS artifacts
+.DS_Store
+Thumbs.db
