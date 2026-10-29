@@ -138,10 +138,12 @@ async function refreshUploadResume() {
       const row = document.createElement('div'), text = document.createElement('p');
       text.textContent = (task.target || task.id) + ' · ' + (task.mode === 'memory' ? '正文纯内存' : '磁盘兼容') + ' · ' + task.state + ' · 云端已确认 ' + bytes(task.confirmed || 0) + ' / ' + bytes(task.size || 0);
       row.append(text);
-      for (const [action,label] of [[task.paused ? 'resume' : 'pause',task.paused ? '继续' : '暂停'],['reset','放弃续传并重传']]) {
+      const actions = task.corrupt ? (task.can_forget ? [['forget','仅移除损坏记录']] : []) : [[task.paused ? 'resume' : 'pause',task.paused ? '继续' : '暂停'],['reset','放弃续传并重传']];
+      for (const [action,label] of actions) {
         const button = document.createElement('button'); button.className = 'small'; button.textContent = label;
         button.onclick = async () => {
-          if (action === 'reset' && !confirm('删除该任务的续传记录？下次将重新上传公网正文，已有云端临时文件不会自动删除。')) return;
+          if (action === 'reset' && !confirm('清理该任务关联的本地暂存正文并删除续传记录？下次将重新上传公网正文，云端临时文件不会自动删除。')) return;
+          if (action === 'forget' && !confirm('仅移除损坏记录？程序无法确定其关联正文，本地残留可能需要手动清理。')) return;
           button.disabled = true;
           try { await api('upload-resume',{id:task.id,action}); await refreshUploadResume(); }
           catch (e) { notice(e.message); button.disabled = false; }

@@ -67,11 +67,21 @@ func (f *davFS) openMemoryFile(ctx context.Context, name string, parent davNode,
 		plan, err = planMemoryUpload(ctx, parent.mount.drive, parent.entry.ID, stageName, size, o)
 	}
 	if err != nil {
+		var unavailable *memoryUnavailable
+		if cp != nil && cp.hasProgress() && errors.As(err, &unavailable) {
+			return nil, &davStatusError{Code: 409, Message: "已有有效续传进度，不能静默切换到第二个磁盘任务；请恢复内存预算或明确放弃旧任务后重传"}
+		}
 		return nil, err
 	}
 	part, workers := plan.partSize, plan.workers
 	if part <= 0 || part > 256<<20 || f.transfers.memory.reservation(part) > int64(o.UploadMemoryMiB)<<20 {
+		if cp != nil && cp.hasProgress() {
+			return nil, &davStatusError{Code: 409, Message: "旧续传分片超过当前内存预算，请恢复预算或明确放弃旧任务后重传"}
+		}
 		return nil, &memoryUnavailable{"云端单片超过单文件内存预算；请增大内存或选择磁盘兼容"}
+	}
+	if err := cp.publish(ctx); err != nil {
+		return nil, err
 	}
 	window := min(int64(o.UploadMemoryMiB)<<20, part*int64(workers)+(int64(o.UploadPrefetchMiB)<<20))
 	window = max(f.transfers.memory.reservation(part), window)
@@ -81,13 +91,10 @@ func (f *davFS) openMemoryFile(ctx context.Context, name string, parent davNode,
 	}
 	d.memory = source
 	d.releaseCheckpoint = func() {
-		if cp != nil {
-			activeCheckpoints.Delete(cp.file)
-		}
 		release()
 	}
 	if cp != nil {
-		activeCheckpoints.Store(cp.file, activeCheckpoint{cp, func() { source.Abort(errors.New("上传续传任务已暂停")) }})
+		cp.activate(func() { source.Abort(errors.New("上传续传任务已暂停")) })
 	}
 	logDAV(ctx, runLogEntry{Operation: "内存流水上传", Source: "WebDAV → 云盘", Result: "开始", Bytes: size, Detail: fmt.Sprintf("文件正文仅驻内存；单文件窗口 %d B；全局预算 %d B；分片 %d B；预读目标 %d MiB；临时名称 %s", window, int64(o.TotalUploadMemoryMiB)<<20, part, o.UploadPrefetchMiB, stageName)})
 	go func() {

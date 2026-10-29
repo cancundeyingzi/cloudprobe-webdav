@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 type activeCheckpoint struct {
 	checkpoint *uploadCheckpoint
 	cancel     context.CancelFunc
+	retired    bool
 }
 
 var activeCheckpoints sync.Map
@@ -71,8 +73,13 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 			var c *uploadCheckpoint
 			active, ok := activeCheckpoints.Load(file)
 			if ok {
-				c = active.(activeCheckpoint).checkpoint
+				a := active.(*activeCheckpoint)
+				c = a.checkpoint
 				c.mu.Lock()
+				if a.retired || c.closed || c.activity != a {
+					c.mu.Unlock()
+					continue
+				}
 			} else {
 				lease, lockErr := lockUploadCheckpoint(filepath.Join(dir, "lease-"+key[:2]))
 				if lockErr != nil {
@@ -82,7 +89,8 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 				c, err = readUploadCheckpoint(file)
 				_ = lease.Close()
 				if err != nil {
-					rows = append(rows, map[string]any{"id": key, "state": "记录损坏，需手动处理"})
+					var pathError *os.PathError
+					rows = append(rows, map[string]any{"id": key, "state": "记录无法读取，需手动处理", "corrupt": true, "can_forget": !errors.As(err, &pathError)})
 					continue
 				}
 			}
@@ -131,23 +139,23 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid task", 400)
 		return
 	}
-	if input.Action != "pause" && input.Action != "resume" && input.Action != "reset" {
+	if input.Action != "pause" && input.Action != "resume" && input.Action != "reset" && input.Action != "forget" {
 		http.Error(w, "invalid action", 400)
 		return
 	}
 	file := filepath.Join(dir, input.ID+".bin")
 	if value, ok := activeCheckpoints.Load(file); ok {
-		a := value.(activeCheckpoint)
+		a := value.(*activeCheckpoint)
 		if input.Action != "pause" {
 			respondJSON(w, 409, map[string]any{"error": "任务仍在上传，请先暂停并等待当前请求结束"})
 			return
 		}
-		a.checkpoint.mu.Lock()
-		a.checkpoint.data.Paused = true
-		err := a.checkpoint.saveLocked()
-		a.checkpoint.mu.Unlock()
-		a.cancel()
+		err := a.pause()
 		if err != nil {
+			if errors.Is(err, errCheckpointRetired) {
+				respondJSON(w, 409, map[string]any{"error": err.Error()})
+				return
+			}
 			g.fail(w, err)
 			return
 		}
@@ -160,14 +168,28 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer lease.Close()
-	if input.Action == "reset" {
+	if input.Action == "forget" {
+		_, readErr := readUploadCheckpoint(file)
+		var pathError *os.PathError
+		if readErr == nil {
+			respondJSON(w, 409, map[string]any{"error": "记录仍可读取，请使用放弃续传以清理关联正文"})
+			return
+		}
+		if errors.As(readErr, &pathError) {
+			g.fail(w, readErr)
+			return
+		}
 		err = os.Remove(file)
 	} else {
 		var c *uploadCheckpoint
 		c, err = readUploadCheckpoint(file)
 		if err == nil {
-			c.data.Paused = input.Action == "pause"
-			err = c.saveLocked()
+			if input.Action == "reset" {
+				err = c.discard()
+			} else {
+				c.data.Paused = input.Action == "pause"
+				err = c.saveLocked()
+			}
 		}
 	}
 	if err != nil {

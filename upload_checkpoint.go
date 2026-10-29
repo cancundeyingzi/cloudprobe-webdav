@@ -39,9 +39,12 @@ type uploadCheckpointData struct {
 	Invalid         bool             `json:"invalid,omitempty"`
 }
 type uploadCheckpoint struct {
-	mu   sync.Mutex
-	file string
-	data uploadCheckpointData
+	mu          sync.Mutex
+	file        string
+	data        uploadCheckpointData
+	closed      bool
+	provisional bool
+	activity    *activeCheckpoint
 }
 type uploadCheckpointKey struct{}
 
@@ -51,6 +54,12 @@ func checkpointFrom(ctx context.Context) *uploadCheckpoint {
 }
 
 func (c *uploadCheckpoint) saveLocked() error {
+	if c.closed {
+		return errCheckpointRetired
+	}
+	if c.provisional {
+		return nil
+	}
 	c.data.Updated = time.Now().UTC()
 	b, err := json.Marshal(c.data)
 	if err != nil {
@@ -161,8 +170,9 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("续传任务正在使用或无法加锁：%w", err)
 	}
-	release := func() { _ = lease.Close() }
 	c := &uploadCheckpoint{file: filepath.Join(dir, key+".bin")}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { c.releaseLease(lease) }) }
 	f, err := os.Open(c.file)
 	if err == nil {
 		b, readErr := io.ReadAll(io.LimitReader(f, (5<<20)+1))
@@ -205,6 +215,23 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 			release()
 			return nil, nil, davLocalError(d.ctx, 423, "云端续传任务已暂停，请在管理界面继续")
 		}
+		// Old versions persisted empty memory candidates before checking the
+		// budget. They have no body progress to protect and may refer to an old
+		// target version after a successful disk fallback.
+		if mode == "memory" && !c.hasProgress() {
+			if err := os.Remove(c.file); err != nil && !os.IsNotExist(err) {
+				release()
+				return nil, nil, err
+			}
+			c.provisional = true
+			c.data.Session = nil
+			c.data.Original = d.original
+			c.data.OriginalVersion = ""
+			if d.original != nil {
+				c.data.OriginalVersion = d.original.ContentVersion
+			}
+			c.data.Stage = "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name)
+		}
 		if old := c.data.Spool; mode == "disk" && old != "" && old != filepath.Base(d.tmp.Name()) && filepath.Base(old) == old && strings.HasPrefix(old, "upload-") {
 			if e := os.Remove(filepath.Join(d.fs.spool, old)); e != nil && !os.IsNotExist(e) {
 				logDAV(d.ctx, runLogEntry{Operation: "清理旧上传暂存", Source: "本机", Result: "待清理", Error: e.Error()})
@@ -223,27 +250,7 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 		release()
 		return nil, nil, err
 	}
-	catalog, err := lockCheckpointCatalog(d.ctx, filepath.Join(dir, "catalog-lease"))
-	if err != nil {
-		release()
-		return nil, nil, err
-	}
-	defer catalog.Close()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		release()
-		return nil, nil, err
-	}
-	count := 0
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".bin") {
-			count++
-		}
-	}
-	if count >= 256 {
-		release()
-		return nil, nil, errors.New("未完成续传任务达到 256 个上限，请先处理或清理旧任务")
-	}
+	c.provisional = true
 	c.data = uploadCheckpointData{Version: 1, Key: key, Size: size, Mode: mode, Hashes: map[int64]string{}, Stage: "CloudProbe-upload-" + randomKey()[:24] + filepath.Ext(d.node.entry.Name), Parts: map[int64]string{}, Original: d.original, Target: d.name, Provider: m.Provider}
 	if mode == "disk" {
 		c.data.Spool = filepath.Base(d.tmp.Name())
@@ -251,7 +258,11 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 	if d.original != nil {
 		c.data.OriginalVersion = d.original.ContentVersion
 	}
-	if err = c.saveLocked(); err != nil {
+	err = nil
+	if mode == "disk" {
+		err = c.publish(d.ctx)
+	}
+	if err != nil {
 		release()
 		return nil, nil, err
 	}
@@ -279,12 +290,20 @@ func (d *davFile) uploadWithCheckpoint(c *uploadCheckpoint) (davEntry, error) {
 	if c == nil {
 		return m.drive.Upload(d.ctx, d.node.parent, "CloudProbe-upload-"+randomKey()[:12]+filepath.Ext(d.node.entry.Name), d.tmp)
 	}
+	if err := c.ensureUsable(); err != nil {
+		return davEntry{}, davCloudError(d.ctx, err)
+	}
 	d.ctx = context.WithValue(d.ctx, uploadCheckpointKey{}, c)
 	baseContext := d.ctx
 	ctx, cancel := context.WithCancel(baseContext)
 	d.ctx = ctx
-	activeCheckpoints.Store(c.file, activeCheckpoint{c, cancel})
-	defer func() { activeCheckpoints.Delete(c.file); d.ctx = baseContext; cancel() }()
+	activity := c.activate(cancel)
+	if activity == nil {
+		d.ctx = baseContext
+		cancel()
+		return davEntry{}, errCheckpointRetired
+	}
+	defer func() { activity.retire(); d.ctx = baseContext; cancel() }()
 	// An already verified staged object needs no body retransmission. Recheck its
 	// identity before feeding it to the existing guarded commit path.
 	if c.data.Uploaded != nil {

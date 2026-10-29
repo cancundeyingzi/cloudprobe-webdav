@@ -643,7 +643,7 @@ func (d *davFile) Close() (err error) {
 		err = d.commitUpload(created, fiSize(d.tmp), d.original)
 	}
 	if err == nil && cp != nil {
-		if cleanup := os.Remove(cp.file); cleanup != nil && !os.IsNotExist(cleanup) {
+		if cleanup := cp.complete(); cleanup != nil {
 			logDAV(d.ctx, runLogEntry{Operation: "清理续传记录", Source: "本机", Result: "待清理", Error: cleanup.Error()})
 		}
 	}
@@ -660,6 +660,11 @@ func fiSize(f *os.File) int64 {
 
 func (d *davFile) commitUpload(created davEntry, size int64, old *davEntry) (err error) {
 	f, m := d.fs, d.node.mount
+	if cp := checkpointFrom(d.ctx); cp != nil {
+		if e := cp.ensureUsable(); e != nil {
+			return davCloudError(d.ctx, e)
+		}
+	}
 	defer f.invalidate(m) // Failed or uncertain renames also invalidate old names.
 	if size < 0 {
 		return davCloudError(d.ctx, errors.New("无法读取上传文件长度"))

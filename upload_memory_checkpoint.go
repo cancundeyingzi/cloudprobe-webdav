@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 )
 
 // Read each replayed part through the bounded memory source, even if the cloud
@@ -122,7 +121,7 @@ func (d *davFile) finishMemoryCheckpoint(entry davEntry) error {
 		err = d.commitUpload(entry, d.memory.size, d.original)
 	}
 	if err == nil {
-		if e := os.Remove(cp.file); e != nil && !os.IsNotExist(e) {
+		if e := cp.complete(); e != nil {
 			logDAV(d.ctx, runLogEntry{Operation: "清理续传记录", Source: "本机", Result: "待清理", Error: e.Error()})
 		}
 	}
