@@ -13,7 +13,11 @@ func TestPortableDataStaysWithExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data != filepath.Join(base, "data") {
+	canonicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data != filepath.Join(canonicalBase, "data") {
 		t.Fatalf("unexpected data path %s", data)
 	}
 	for _, p := range []string{"..", filepath.Join("..", "escape"), t.TempDir(), base} {

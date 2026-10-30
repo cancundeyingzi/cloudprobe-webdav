@@ -474,6 +474,10 @@ type davIncomingConnectionKey struct{}
 
 func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inbound := newDAVInboundBody(w, r, s.bodyIdleTimeout)
+	// Keep net/http's original request body intact. It inspects that concrete
+	// body during early close to half-close TCP and let the error response reach
+	// a client that is still uploading, before resetting the connection.
+	r = r.WithContext(r.Context())
 	r.Body = inbound
 	defer inbound.finish()
 	s.requestOnce.Do(func() { s.requestSlots = make(chan struct{}, 256) })
