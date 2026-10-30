@@ -28,6 +28,8 @@ type davMount struct {
 	Identity          string `json:"-"`
 	drive             davDrive
 	health            *routeHealth
+	writeMu           sync.RWMutex
+	writeWarning      *davWriteWarning
 }
 type davCache struct {
 	entries []davEntry

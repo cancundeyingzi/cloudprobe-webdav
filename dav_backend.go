@@ -15,6 +15,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	wopan "github.com/OpenListTeam/wopan-sdk-go"
@@ -111,6 +112,8 @@ type wopanDAVDrive struct {
 	root              string
 	family            string
 	directErr         string
+	directCause       error
+	writeStateMu      sync.RWMutex
 	redactor          *Redactor
 	onRefresh         func(string, string) error
 	serverAccess      string
@@ -151,7 +154,7 @@ func newWopanDAVDrive(cl *Client, credentials map[string]any, root string, refre
 		d.mu.Unlock()
 		if d.onRefresh != nil {
 			if e := saveRefreshedDAVCredential(context.Background(), d.onRefresh, access, refresh); e != nil {
-				d.directErr = "令牌已刷新，但持久化失败：" + cl.redact.Text(e.Error())
+				d.setDirectError("令牌已刷新，但持久化失败："+cl.redact.Text(e.Error()), e)
 			}
 		}
 	})
@@ -233,12 +236,12 @@ func (d *wopanDAVDrive) probe(ctx context.Context) error {
 		}
 	}
 	if e != nil {
-		d.directErr = "联通直连写接口的凭据验证未通过：" + d.redactor.Text(e.Error())
-		return errors.New(d.directErr)
+		d.setDirectError("联通直连写接口的凭据验证未通过："+d.redactor.Text(e.Error()), e)
+		return fmt.Errorf("联通直连写接口的凭据验证未通过：%w", e)
 	}
-	d.directErr = ""
+	d.setDirectError("", nil)
 	if e := d.w.InitData(); e != nil {
-		return fmt.Errorf("联通上传初始化失败：%s", d.redactor.Text(e.Error()))
+		return fmt.Errorf("联通上传初始化失败：%w", e)
 	}
 	logDAV(ctx, runLogEntry{Operation: "上传节点初始化", Source: d.source(), Endpoint: nodeHost(d.w.ZoneURL), Result: "成功"})
 	return nil
@@ -449,10 +452,20 @@ func (d *wopanDAVDrive) URL(ctx context.Context, it davEntry) (string, error) {
 	return "", fmt.Errorf("网易代理与联通两种下载地址接口均未返回可用结果：%v；%v", primary, e)
 }
 func (d *wopanDAVDrive) ready() error {
+	d.writeStateMu.RLock()
+	defer d.writeStateMu.RUnlock()
 	if d.directErr != "" {
+		if d.directCause != nil {
+			return fmt.Errorf("联通写入通道不可用：%w", d.directCause)
+		}
 		return errors.New(d.directErr)
 	}
 	return nil
+}
+func (d *wopanDAVDrive) setDirectError(message string, cause error) {
+	d.writeStateMu.Lock()
+	d.directErr, d.directCause = message, cause
+	d.writeStateMu.Unlock()
 }
 func (d *wopanDAVDrive) Mkdir(ctx context.Context, parent, name string) (entry davEntry, err error) {
 	if e := d.directMu.LockContext(ctx); e != nil {

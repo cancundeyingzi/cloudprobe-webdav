@@ -19,6 +19,8 @@ CloudProbe 将网易爆米花绑定的联通/移动云盘及独立登录的夸�
 
 1.12.6 将引擎故障作为页面顶部的常驻提示，显示具体原因、对应处理办法、组件实际路径和可复制的诊断信息。启动前检查必要组件及 .NET 8 x64，保留最多 8 KiB 的桥接标准错误尾部，并在展示和记录前脱敏。运行后桥接退出也会展示故障；网易引擎不可用不影响独立夸克账号的操作。尚不能确定的原因会明确说明，不再只显示“启动失败”。
 
+1.12.7 将云盘读取能力与写入检查分开：目录可读取时，联通写入通道预检失败不再阻止 WebDAV 启动，浏览和下载继续可用。明确的写入权限拒绝显示“权限恢复前上传会失败”；仅验证失败则显示“上传可能失败”，并提供具体原因、受影响路径及处理建议。实际写入仍执行原有保护，云盘明确拒绝写入时返回 403；该路径同类操作成功后清除相应运行时告警。读取验证失败、用户取消启动及本机资料目录权限限制仍按原规则处理。
+
 ## 项目结构
 
 - 根目录 Go 文件：客户端、驱动、WebDAV 服务和测试。
@@ -55,7 +57,7 @@ GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号�
 Windows PowerShell 7 下运行：
 
 ```powershell
-.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.6
+.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.7
 ```
 
 脚本从源码编译 EXE 与 Bridge，按明确组件清单装配 SDK，使用默认 `data/` 验证真实引擎启动后清理测试资料并打包。输出 ZIP 不包含账号资料；Windows 仍需 .NET 8 x64 运行时。

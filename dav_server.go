@@ -78,18 +78,20 @@ type davActivity struct {
 	Error          string `json:"error,omitempty"`
 }
 type davManager struct {
-	controlMu sync.RWMutex
-	mu        sync.Mutex
-	app       *guiApp
-	server    *http.Server
-	cancel    context.CancelFunc
-	config    davSavedConfig
-	mounts    []*davMount
-	urls      []string
-	activity  []davActivity
-	active    int
-	lastError string
-	transfers *transferRuntime
+	// Test transports may replace provider HTTP/bridge requests without bypassing Start.
+	wopanClientSetup func(*wopanDAVDrive)
+	controlMu        sync.RWMutex
+	mu               sync.Mutex
+	app              *guiApp
+	server           *http.Server
+	cancel           context.CancelFunc
+	config           davSavedConfig
+	mounts           []*davMount
+	urls             []string
+	activity         []davActivity
+	active           int
+	lastError        string
+	transfers        *transferRuntime
 }
 
 func newDAVManager(g *guiApp) *davManager {
@@ -127,7 +129,7 @@ func (d *davManager) Status() map[string]any {
 	defer d.mu.Unlock()
 	var mounts []map[string]any
 	for _, m := range d.mounts {
-		mounts = append(mounts, map[string]any{"alias": m.Alias, "provider": m.Provider, "root": m.Root, "writable": m.Writable, "write_status": m.WriteStatus, "upload_storage_mode": m.UploadStorageMode})
+		mounts = append(mounts, map[string]any{"alias": m.Alias, "provider": m.Provider, "root": m.Root, "writable": m.Writable, "write_status": m.WriteStatus, "write_warning": m.writeWarningSnapshot(), "upload_storage_mode": m.UploadStorageMode})
 	}
 	var saved []map[string]any
 	if d.app != nil {
@@ -299,18 +301,24 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 			drive := newWopanDAVDrive(cl, a.credentials, sel.Root, func(access, refresh string) error { return g.saveDAVCredential(a, access, refresh) })
 			drive.uploadConcurrency, drive.uploadPartMiB, drive.uploadBudget = cfg.UploadConcurrency, cfg.UploadPartMiB, transfers.connections
 			drive.uploadMode = cfg.UploadMode
+			if d.wopanClientSetup != nil {
+				d.wopanClientSetup(drive)
+			}
 			m.drive = drive
 			if m.Writable {
 				probeCtx, cancel := context.WithTimeout(mountCtx, 35*time.Second)
 				e = drive.probe(probeCtx)
 				cancel()
 				if e != nil {
-					if backupConfig == nil || !backupConfig.Verified {
-						return nil, errors.New(cl.redact.Text(e.Error()))
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
 					}
-					logFallback(mountCtx, "内置写入凭据验证", "已核验的 OpenList 备用", e)
+					m.warnWrite("/"+m.Alias, "", e, cl.redact.Text)
+					logDAV(mountCtx, runLogEntry{Operation: "写入通道检查", Source: "联通原生接口", Result: "警告", Error: cl.redact.Text(e.Error()), Detail: "写入检查失败不阻止 WebDAV 启动，继续验证目录读取。"})
+					m.WriteStatus = "写入通道未通过验证；读取能力单独检查"
+				} else {
+					m.WriteStatus = "写入通道已初始化；实际权限由每次云端操作核验"
 				}
-				m.WriteStatus = "读写接口已接入；每次操作检查上游结果"
 			}
 		} else {
 			m.drive = &mobileDAVDrive{originalDAVDrive: originalDAVDrive{client: cl}, onRefresh: func(access, refresh string) error { return g.saveDAVCredential(a, access, refresh) }, budget: transfers.connections, partMiB: cfg.UploadPartMiB}
@@ -322,6 +330,7 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 		probeCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
 		_, e = m.drive.List(probeCtx, m.Root)
 		cancel()
+		primaryReadable := e == nil
 		if e != nil {
 			if backupConfig == nil || !backupConfig.Verified {
 				return nil, fmt.Errorf("挂载 %s 的目录验证失败：%s", m.Alias, cl.redact.Text(e.Error()))
@@ -342,24 +351,34 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 			if backup.cfg.Address == "http://"+g.host || u.Host == net.JoinHostPort("127.0.0.1", strconv.Itoa(in.Port)) || u.Host == net.JoinHostPort("localhost", strconv.Itoa(in.Port)) {
 				return nil, errors.New("OpenList 地址不能指向本工具管理界面")
 			}
+			backupUnavailable := false
 			if !backupConfig.Verified {
 				if e = verifyOpenList(mountCtx, m.drive, m.Root, backup, g.data); e != nil {
-					return nil, errors.New(g.redactDAV(e.Error()))
+					if !primaryReadable || !cloudWriteDenied(e) {
+						return nil, errors.New(g.redactDAV(e.Error()))
+					}
+					backupUnavailable = true
+					m.warnWrite("/"+m.Alias, "", fmt.Errorf("OpenList 映射验证需要云端写入，当前被拒绝；本次使用已核验的内置读取通道，未启用 OpenList 备用：%w", e), g.redactDAV)
+				} else {
+					backupConfig.Verified = true
 				}
-				backupConfig.Verified = true
 			}
 			if e = g.saveOpenList(backupKey, *backupConfig); e != nil {
 				return nil, e
 			}
-			m.drive = &backupDAVDrive{primary: m.drive, backup: backup, root: m.Root, paths: map[string]string{m.Root: ""}, entries: map[string]davEntry{}}
-			checkCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
-			_, checkErr := m.drive.List(checkCtx, m.Root)
-			cancel()
-			if checkErr != nil {
-				return nil, errors.New(g.redactDAV(checkErr.Error()))
+			if !backupUnavailable {
+				m.drive = &backupDAVDrive{primary: m.drive, backup: backup, root: m.Root, paths: map[string]string{m.Root: ""}, entries: map[string]davEntry{}}
+				checkCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
+				_, checkErr := m.drive.List(checkCtx, m.Root)
+				cancel()
+				if checkErr != nil {
+					return nil, errors.New(g.redactDAV(checkErr.Error()))
+				}
+				m.WriteStatus += "；OpenList 仅作目录和下载备用，写入使用原生接口"
+			} else {
+				m.WriteStatus += "；OpenList 映射未核验，本次仅使用内置读取通道"
 			}
 			savedMount.OpenListEnabled, savedMount.OpenListAddress, savedMount.OpenListRoot = true, backup.cfg.Address, backup.cfg.Root
-			m.WriteStatus += "；OpenList 仅作目录和下载备用，写入使用原生接口"
 		} else if sel.OpenList != nil && !sel.OpenList.Enabled {
 			if e = g.saveOpenList(backupKey, openListSaved{Identity: m.Identity}); e != nil {
 				return nil, e
@@ -521,6 +540,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = 200
 		}
+		s.recordWriteResult(r, state, status)
 		entry := runLogEntry{Operation: "WebDAV 请求", Source: "第三方客户端", Result: strconv.Itoa(status), DurationMs: time.Since(started).Milliseconds(), ReceivedBytes: state.bodyBytes, SentBytes: tr.sent.Load(), ConfirmedBytes: tr.confirmed.Load(), ResponseBytes: rw.bytes, Error: s.safeError(state.err)}
 		entry.ConnectionID, entry.Protocol, entry.LocalAddress, entry.RemoteAddress = connectionID, r.Proto, localAddress, r.RemoteAddr
 		if r.Method == "PUT" {
@@ -798,6 +818,9 @@ func (w *davResponse) WriteHeader(code int) {
 		var max *http.MaxBytesError
 		if errors.As(w.state.err, &local) {
 			code = local.Code
+			w.failed = true
+		} else if isDAVWrite(w.state.method) && cloudWriteDenied(w.state.err) {
+			code = http.StatusForbidden
 			w.failed = true
 		} else if errors.As(w.state.err, &upstream) {
 			code = 502

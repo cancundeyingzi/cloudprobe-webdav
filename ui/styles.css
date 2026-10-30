@@ -45,6 +45,10 @@ p { line-height: 1.8; margin-bottom: 12px; }
 svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .hidden { display: none !important; }
 .banner.engine-failure { border-left: 4px solid #b64046; white-space: normal; }
+#dav-write-warning { white-space: normal; border-left: 4px solid #ba7b19; }
+#dav-write-warning h2 { color: #885d1b; }
+#dav-write-warning p { margin: 5px 0; }
+#dav-write-warning-items > div + div { margin-top: 12px; border-top: 1px solid #ead7b8; padding-top: 12px; }
 .engine-failure h2 { color: #922c33; margin-bottom: 8px; }
 .engine-failure p { margin-bottom: 10px; overflow-wrap: anywhere; }
 .engine-failure ol { margin: 8px 0 12px; padding-left: 22px; line-height: 1.9; }
