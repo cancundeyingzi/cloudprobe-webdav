@@ -1,0 +1,99 @@
+
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify WebDAV patch
+        run: git apply --reverse --check third_party/webdav.patch
+
+      - name: Run tests
+        run: go test -mod=vendor -count=1 -timeout=10m ./...
+
+      - name: Static analysis
+        run: go vet -mod=vendor ./...
+
+      - name: Race detection
+        if: runner.os == 'Linux'
+        run: go test -mod=vendor -race -count=1 -timeout=10m ./...
+
+  release:
+    name: Build and Publish
+    needs: test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cross compile
+        shell: bash
+        run: |
+          mkdir -p dist
+
+          for target in windows/amd64 linux/amd64 linux/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="CloudProbe_${GITHUB_REF_NAME}_${os}_${arch}"
+
+            if [ "$os" = "windows" ]; then
+              binary="dist/${name}.exe"
+            else
+              binary="dist/${name}"
+            fi
+
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+              go build -mod=vendor -trimpath \
+              -ldflags="-s -w" -o "$binary" .
+
+            if [ "$os" = "windows" ]; then
+              zip -j "dist/${name}.zip" "$binary"
+              rm "$binary"
+            else
+              tar -C dist -czf "dist/${name}.tar.gz" "$name"
+              rm "$binary"
+            fi
+          done
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/* \
+            --generate-notes \
+            --verify-tag
