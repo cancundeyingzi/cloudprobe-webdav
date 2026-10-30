@@ -31,6 +31,13 @@ func (f *davFS) checkNativeWrite(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	// A failed native credential preflight already makes these writes unusable.
+	// Reject before receiving a body or publishing an empty resume checkpoint.
+	if native := nativeWopanDrive(p.mount.drive); native != nil {
+		if err := native.ready(); err != nil {
+			return err
+		}
+	}
 	b, ok := p.mount.drive.(*backupDAVDrive)
 	if !ok {
 		return ctx.Err()
@@ -67,6 +74,8 @@ func davWriteCheckFailure(ctx context.Context, name string, err error) *davStatu
 	case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
 		failure.Code = http.StatusGatewayTimeout
 	case errors.Is(err, os.ErrPermission):
+		failure.Code = http.StatusForbidden
+	case cloudWriteDenied(err):
 		failure.Code = http.StatusForbidden
 	case errors.Is(err, os.ErrInvalid):
 		failure.Code = http.StatusBadRequest

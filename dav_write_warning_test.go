@@ -68,6 +68,9 @@ func warningStartFixture(t *testing.T, mode string) (*davManager, davStartInput,
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	in := davStartInput{Listen: "127.0.0.1", Port: port, Username: "tester", Password: "test-password-123", MaxUploadMiB: 16, Mounts: []davMountInput{{Account: "a", Alias: "盘", Root: "0", Writable: true}}, transferOptions: transferOptions{UploadStorageMode: "disk"}}
+	if mode == "denied-memory" {
+		in.UploadStorageMode = "memory"
+	}
 	if mode == "openlist-denied" {
 		in.Mounts[0].OpenList = &openListInput{Enabled: true, Address: node.URL, Root: "/", Token: "fixture-openlist-token", VerifyWrite: true}
 	}
@@ -76,7 +79,7 @@ func warningStartFixture(t *testing.T, mode string) (*davManager, davStartInput,
 }
 
 func TestDAVStartsWithReadableCloudWhenWriteProbeFails(t *testing.T) {
-	for _, mode := range []string{"denied", "unverified", "healthy", "readonly", "openlist-denied"} {
+	for _, mode := range []string{"denied", "denied-memory", "unverified", "healthy", "readonly", "openlist-denied"} {
 		t.Run(mode, func(t *testing.T) {
 			d, in, body, calls := warningStartFixture(t, mode)
 			if mode == "readonly" {
@@ -134,7 +137,7 @@ func TestDAVStartsWithReadableCloudWhenWriteProbeFails(t *testing.T) {
 			if code < 400 || len(reply) == 0 {
 				t.Fatalf("write reported success: %d %s", code, reply)
 			}
-			if mode == "denied" && code != 403 {
+			if strings.HasPrefix(mode, "denied") && code != 403 {
 				t.Fatalf("permission response = %d %s", code, reply)
 			}
 			if got := wantDAV(t, base, "GET", "/盘/old.txt", "", 200, nil); string(got) != body {
@@ -142,6 +145,9 @@ func TestDAVStartsWithReadableCloudWhenWriteProbeFails(t *testing.T) {
 			}
 			if d.Status()["running"] != true {
 				t.Fatal("write failure stopped service")
+			}
+			if _, err := os.Stat(filepath.Join(d.app.data, "webdav-spool")); !os.IsNotExist(err) {
+				t.Fatal("known unavailable write channel accepted/spooled the body", err)
 			}
 		})
 	}
