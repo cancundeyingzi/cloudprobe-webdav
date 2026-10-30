@@ -74,12 +74,46 @@ function paintConsoleStatus(s) {
   $('login-badge').classList.toggle('yes',!!s.logged_in);
 }
 function notice(text,kind='error'){const n=$('notice');n.textContent=text;n.className='banner '+kind;n.classList.toggle('hidden',!text)}
+let engineFailureSignature = '', engineDiagnosticText = '';
+function paintEngineFailure(s) {
+ const diagnostic = s.engine_diagnostic || (s.engine_error ? {title:'网易引擎不可用',reason:s.engine_error,steps:['关闭程序后重新启动；如果仍失败，复制诊断信息以进一步定位。']} : null);
+ const host = $('engine-failure');
+ host.classList.toggle('hidden',!diagnostic);
+ if (!diagnostic) { engineFailureSignature='';engineDiagnosticText='';return; }
+ $('engine-label').textContent='引擎不可用';
+ $('footer-state').textContent=diagnostic.reason;
+ $('login-state').textContent=diagnostic.title || '网易引擎不可用';
+ $('login-qr').classList.remove('hidden');
+ $('login-done').classList.add('hidden');
+ $('login-badge').textContent='引擎不可用';
+ $('qr-image').classList.add('hidden');
+ $('qr-placeholder').classList.remove('hidden');
+ $('qr-placeholder').textContent=diagnostic.reason;
+ $('qr-expiry').textContent='请先按页面顶部的处理办法排除故障，再重新启动程序。';
+ const signature=JSON.stringify(diagnostic);
+ if(signature===engineFailureSignature)return;
+ engineFailureSignature=signature;
+ $('engine-failure-title').textContent=diagnostic.title || '网易引擎不可用';
+ $('engine-failure-reason').textContent=diagnostic.reason || s.engine_error;
+ const steps=$('engine-failure-steps');steps.replaceChildren();
+ for(const step of diagnostic.steps || []) { const item=document.createElement('li');item.textContent=step;steps.append(item); }
+ const paths=diagnostic.paths || {}, lines=[];
+ if(diagnostic.detail)lines.push(diagnostic.detail);
+ for(const [key,label] of [['executable','当前程序'],['sdk','SDK 目录'],['bridge','桥接组件'],['data','资料目录']])if(paths[key])lines.push(label+'：'+paths[key]);
+ $('engine-failure-detail').textContent=lines.join('\n\n') || '底层没有提供更多错误信息，原因尚未确认。';
+ $('engine-copy-status').textContent='';
+ engineDiagnosticText=['CloudProbe '+(s.version || ''),diagnostic.title,diagnostic.reason,'错误类型：'+(diagnostic.code || 'unknown'),'处理办法：',...(diagnostic.steps || []),...lines].filter(Boolean).join('\n');
+}
+$('engine-copy-diagnostic').onclick=async()=>{
+ try {await navigator.clipboard.writeText(engineDiagnosticText);$('engine-copy-status').textContent='诊断信息已复制';}
+ catch { $('engine-failure-details').open=true;$('engine-copy-status').textContent='复制失败，请在展开的详情中手动选择复制。'; }
+};
 async function api(path,data,method='POST'){const r=await fetch('/api/'+path,{method,headers:{'X-CloudProbe-UI':nonce,...(method==='POST'?{'Content-Type':'application/json'}:{})},...(method==='POST'?{body:JSON.stringify(data||{})}:{})});let d;try{d=await r.json()}catch{throw new Error(await r.text().catch(()=> '本地服务连接异常'))}if(!r.ok){const e=new Error(d.error||'请求失败');e.data=d;throw e}return d}
 function selectedAccountReady(){const a=(state.accounts||[]).find(a=>a.key===$('account').value);return !!a&&(a.provider==='quark'||state.engine_ready&&state.logged_in)}
 function controls(){const ready=selectedAccountReady();$('query-files').disabled=!ready||busy;$('refresh-accounts').disabled=(!state.logged_in&&!state.has_accounts)||busy;$('account').disabled=!(state.accounts||[]).length||busy;$('logout').disabled=!state.logged_in||!state.engine_ready||busy;$('refresh-qr').disabled=!state.engine_ready||state.logged_in||qrLoading;$('poll-login').disabled=!qrLoaded||state.logged_in||polling;$('fetch-file').disabled=!ready||busy||!selected||selected.directory;$('export-results').disabled=!state.has_result||busy;$('back-dir').disabled=!historyDirs.length||busy;davControls();quarkControls()}
 function paintStatus(s){state=s;$('engine-dot').classList.toggle('ready',!!s.engine_ready);$('engine-label').textContent=s.engine_ready?'原版引擎就绪':'引擎启动中';$('footer-state').textContent=s.stage||'';$('version-label').textContent=s.version||'—';$('login-state').textContent=s.stage||'';$('login-badge').textContent=s.logged_in?'已登录':'未登录';$('login-qr').classList.toggle('hidden',!!s.logged_in);$('login-done').classList.toggle('hidden',!s.logged_in);$('logged-user').textContent=s.user||'';$('event-log').textContent=(s.events||[]).join('\n')||'等待原版引擎初始化…';paintDAV(s.webdav||{});paintWebLogin();paintTransfers(s.webdav||{});paintConsoleStatus(s);paintQuarkStatus(s);pollRunLog(s.run_log||{});
  const a=$('account'),old=a.value,next=s.accounts||[];if(a.options.length!==next.length||Array.from(a.options).some((o,i)=>!next[i]||next[i].key!==o.value)){a.replaceChildren();if(!next.length){a.add(new Option(s.logged_in?'未发现已绑定的移动/联通云盘':'登录后选择',''))}else{next.forEach(x=>a.add(new Option(x.name,x.key)));if(next.some(x=>x.key===old))a.value=old;accountChanged()}}
- if(s.engine_error){if(!s.has_accounts) $('footer-state').textContent='网易引擎不可用；独立夸克登录仍可使用。';$('engine-label').textContent='启动失败';$('qr-placeholder').textContent='原版引擎未能启动，请查看上方提示。'}
+ paintEngineFailure(s);
  controls();if(s.engine_ready&&!s.logged_in&&!qrTried&&!qrLoading)refreshQR();
 }
 async function status(){if(stopped)return;try{paintStatus(await api('status',null,'GET'))}catch(e){$('footer-state').textContent='本地服务已断开；重新启动工具后刷新页面。'}}
@@ -124,4 +158,4 @@ $('dav-show').onclick=()=>{const input=$('dav-pass');input.type=input.type==='pa
 $('dav-copy-pass').onclick=()=>{$('dav-pass').value?copyDAV($('dav-pass').value):notice('当前密码未在页面保留。如已设置，可停止服务后填写新密码。')};
 $('dav-start').onclick=async()=>{busy=true;controls();notice('正在验证挂载和写接口，首次启动可能需要数秒。','');try{const d=await api('webdav/start',{listen:$('dav-listen').value,port:Number($('dav-port').value),username:$('dav-user').value,password:$('dav-pass').value,max_upload_mib:Number($('dav-max').value),upload_concurrency:Number($('dav-concurrency').value),upload_mode:$('dav-mode').value,...transferPayload(),mounts:davRows.filter(r=>r.enabled.checked).map(r=>({account:r.account,alias:r.alias.value.trim(),root:r.root.value.trim(),writable:r.permission.value==='write',upload_storage_mode:r.storage.value,openlist:openListPayload(r.account)}))});if(d.generated_password){$('dav-pass').value=d.generated_password;$('dav-pass-hint').textContent='已自动生成密码，请复制到第三方软件。此密码只在本页保留，配置中保存校验值。'}paintDAV(d);notice('WebDAV 已启动，可以使用连接地址访问。','success');await status()}catch(e){notice(e.message)}finally{busy=false;controls()}};
 $('dav-stop').onclick=async()=>{busy=true;controls();try{paintDAV(await api('webdav/stop'));notice('WebDAV 已停止。','success');await status()}catch(e){notice(e.message)}finally{busy=false;controls()}};
-setInterval(status,4000);setInterval(poll,2200);setInterval(()=>{if(qrLoaded&&!state.logged_in){const remain=Math.max(0,(state.qr_expires||0)-Math.floor(Date.now()/1000));$('qr-expiry').textContent=remain?'二维码剩余约 '+remain+' 秒；请在手机上确认登录。':'二维码可能已到期，请刷新。'}},1000);status();
+setInterval(status,4000);setInterval(poll,2200);setInterval(()=>{if(qrLoaded&&!state.logged_in&&!state.engine_error){const remain=Math.max(0,(state.qr_expires||0)-Math.floor(Date.now()/1000));$('qr-expiry').textContent=remain?'二维码剩余约 '+remain+' 秒；请在手机上确认登录。':'二维码可能已到期，请刷新。'}},1000);status();

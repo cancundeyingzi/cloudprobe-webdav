@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +45,7 @@ type OriginalBridge struct {
 	done       chan struct{}
 	seq        atomic.Int64
 	lastErr    error
+	stderr     *engineErrorTail
 }
 
 func (b *OriginalBridge) Alive() bool {
@@ -60,17 +63,32 @@ func (b *OriginalBridge) Alive() bool {
 }
 
 func startOriginalBridge(ctx context.Context, sdk, bridgeFile, data string) (*OriginalBridge, error) {
-	for _, p := range []string{filepath.Join(sdk, "ntkernel.dll"), filepath.Join(sdk, "BaoMiHua.dll"), filepath.Join(sdk, "QRCoder.dll"), bridgeFile} {
-		if _, e := os.Stat(p); e != nil {
-			return nil, fmt.Errorf("缺少运行组件 %s", filepath.Base(p))
+	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
+		return nil, engineProblem("unsupported_platform", "原版 SDK 只支持 Windows x64。", runtime.GOOS+"/"+runtime.GOARCH)
+	}
+	configFile := strings.TrimSuffix(bridgeFile, filepath.Ext(bridgeFile)) + ".runtimeconfig.json"
+	for _, p := range []string{filepath.Join(sdk, "ntkernel.dll"), filepath.Join(sdk, "BaoMiHua.dll"), filepath.Join(sdk, "QRCoder.dll"), bridgeFile, configFile} {
+		info, e := os.Stat(p)
+		if e != nil || !info.Mode().IsRegular() {
+			code, detail := "component_unreadable", p
+			if os.IsNotExist(e) {
+				code = "component_missing"
+			}
+			if e != nil {
+				detail += "\n" + e.Error()
+			}
+			return nil, engineProblem(code, "无法读取运行组件："+filepath.Base(p), detail)
 		}
 	}
 	dotnet, e := exec.LookPath("dotnet")
 	if e != nil {
-		return nil, errors.New("未找到 dotnet；此原版桥接需要 .NET 8 x64 运行时")
+		return nil, engineProblem("runtime_missing", "PATH 中未找到 dotnet 程序。", "需要 Microsoft .NET 8 Windows x64 运行时。")
+	}
+	if e = checkEngineRuntime(ctx, dotnet); e != nil {
+		return nil, e
 	}
 	if e = os.MkdirAll(data, 0700); e != nil {
-		return nil, e
+		return nil, engineProblem("data_unwritable", "无法创建引擎资料目录。", data+"\n"+e.Error())
 	}
 	cmd := exec.Command(dotnet, bridgeFile, sdk, data)
 	hideChildWindow(cmd)
@@ -83,10 +101,11 @@ func startOriginalBridge(ctx context.Context, sdk, bridgeFile, data string) (*Or
 	if e != nil {
 		return nil, e
 	}
-	cmd.Stderr = io.Discard
-	b := &OriginalBridge{cmd: cmd, stdin: in, pending: map[int64]chan BridgeReply{}, ready: make(chan BridgeReply, 1), done: make(chan struct{})}
+	tail := &engineErrorTail{}
+	cmd.Stderr = tail
+	b := &OriginalBridge{cmd: cmd, stdin: in, pending: map[int64]chan BridgeReply{}, ready: make(chan BridgeReply, 1), done: make(chan struct{}), stderr: tail}
 	if e = cmd.Start(); e != nil {
-		return nil, e
+		return nil, engineProblem("process_start", "无法启动 .NET 桥接进程。", dotnet+"\n"+bridgeFile+"\n"+e.Error())
 	}
 	b.startWriter()
 	go func() {
@@ -124,23 +143,46 @@ func startOriginalBridge(ctx context.Context, sdk, bridgeFile, data string) (*Or
 	case r := <-b.ready:
 		if !r.OK {
 			b.Close()
-			return nil, errors.New(r.Error)
+			return nil, describeEngineError(errors.New(r.Error))
 		}
 		return b, nil
 	case <-b.done:
+		// The child may report a structured initialization error and exit in
+		// the same scheduling turn. Prefer that reason over a generic exit.
+		select {
+		case r := <-b.ready:
+			if !r.OK {
+				return nil, describeEngineError(errors.New(r.Error))
+			}
+		default:
+		}
 		return nil, b.exitError()
 	case <-ctx.Done():
 		b.Close()
 		return nil, ctx.Err()
 	case <-time.After(25 * time.Second):
 		b.Close()
-		return nil, errors.New("原版引擎初始化超时")
+		return nil, engineProblem("timeout", "原版引擎在 25 秒内未报告就绪。", tail.Text())
 	}
 }
 func (b *OriginalBridge) exitError() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return fmt.Errorf("原版桥接进程已退出（%v）；请检查 .NET 8 运行时和 SDK 依赖", b.lastErr)
+	detail := "尚未取得进程退出码。"
+	if b.cmd != nil && b.cmd.ProcessState != nil {
+		detail = fmt.Sprintf("退出码：%d", b.cmd.ProcessState.ExitCode())
+	}
+	if b.lastErr != nil {
+		detail += "\n进程错误：" + b.lastErr.Error()
+	}
+	if b.cmd != nil {
+		detail += "\ndotnet：" + b.cmd.Path
+	}
+	if tail := b.stderr.Text(); tail != "" {
+		detail += "\n标准错误输出：\n" + tail
+	}
+	detail = redactEngineDetail(detail, (&Redactor{}).Text)
+	return describeEngineError(errors.New(detail))
 }
 
 type bridgeCommand struct {

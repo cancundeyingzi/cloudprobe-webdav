@@ -155,7 +155,6 @@ async function refreshUploadResume() {
     if (!host.childNodes.length) host.textContent = '没有待恢复的云端上传任务。';
   } catch (e) { host.textContent = '读取续传任务失败：' + e.message; }
 }
-$('resume-refresh').onclick = refreshUploadResume;
 
 async function refreshSpoolCleanup() {
   const host = $('spool-tasks');
@@ -192,5 +191,8 @@ async function refreshCheckpointHistory() {
     if (!host.childNodes.length) host.textContent='没有旧云端事务记录。';
   } catch(e) {host.textContent='读取旧事务失败：'+e.message;}
 }
-$('spool-refresh').onclick=refreshSpoolCleanup;
-$('history-refresh').onclick=refreshCheckpointHistory;
+window.addEventListener('DOMContentLoaded',()=>{
+  $('resume-refresh').onclick=refreshUploadResume;
+  $('spool-refresh').onclick=refreshSpoolCleanup;
+  $('history-refresh').onclick=refreshCheckpointHistory;
+});

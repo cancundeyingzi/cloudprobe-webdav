@@ -17,6 +17,8 @@ CloudProbe 将网易爆米花绑定的联通/移动云盘及独立登录的夸�
 
 1.12.5 默认将全部 GUI 运行资料保存在 EXE 旁的 `data/`，不再使用 AppData。相对 `--data` 也以 EXE 目录为基准，禁止指向软件目录外；目录不可写时直接报错。账号、配置、日志、登录浏览器资料、上传正文及续传状态、SDK 与子进程临时资料均随软件目录保存。命令行的默认配置及结果也放在软件目录内；显式导出结果仍以用户选择的输出位置为准。退出程序后删除软件目录即可移除本程序管理的数据，升级时保留原 `data/`。
 
+1.12.6 将引擎故障作为页面顶部的常驻提示，显示具体原因、对应处理办法、组件实际路径和可复制的诊断信息。启动前检查必要组件及 .NET 8 x64，保留最多 8 KiB 的桥接标准错误尾部，并在展示和记录前脱敏。运行后桥接退出也会展示故障；网易引擎不可用不影响独立夸克账号的操作。尚不能确定的原因会明确说明，不再只显示“启动失败”。
+
 ## 项目结构
 
 - 根目录 Go 文件：客户端、驱动、WebDAV 服务和测试。
@@ -53,7 +55,7 @@ GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号�
 Windows PowerShell 7 下运行：
 
 ```powershell
-.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.5
+.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.6
 ```
 
 脚本从源码编译 EXE 与 Bridge，按明确组件清单装配 SDK，使用默认 `data/` 验证真实引擎启动后清理测试资料并打包。输出 ZIP 不包含账号资料；Windows 仍需 .NET 8 x64 运行时。

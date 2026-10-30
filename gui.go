@@ -70,6 +70,8 @@ type guiApp struct {
 	bridge                *OriginalBridge
 	stage                 string
 	engineError           string
+	engineFailure         *engineFailure
+	enginePaths           enginePaths
 	logged                bool
 	user                  string
 	qrToken               string
@@ -221,16 +223,27 @@ func (g *guiApp) publicStatus() map[string]any {
 	for _, k := range g.accountOrder {
 		accounts = append(accounts, g.accounts[k])
 	}
-	engineError := g.engineError
-	if g.bridge != nil && !g.bridge.Alive() {
-		engineError = "原版桥接进程已退出，请关闭工具后重新启动"
+	var engineErr error
+	if g.engineFailure != nil {
+		engineErr = g.engineFailure
+	} else if g.engineError != "" {
+		engineErr = errors.New(g.engineError)
 	}
-	out := map[string]any{"version": version, "engine_ready": g.bridge.Alive(), "stage": g.stage, "engine_error": engineError, "logged_in": g.logged, "user": g.user, "accounts": accounts, "has_accounts": len(accounts) > 0, "events": append([]string(nil), g.events...), "qr_expires": g.qrExpires.Unix(), "poll_after_seconds": g.pollAfter, "has_result": g.lastResult != ""}
+	if g.bridge != nil && !g.bridge.Alive() {
+		engineErr = g.bridge.exitError()
+	}
+	paths := g.enginePaths
+	out := map[string]any{"version": version, "engine_ready": g.bridge.Alive(), "stage": g.stage, "engine_error": "", "logged_in": g.logged, "user": g.user, "accounts": accounts, "has_accounts": len(accounts) > 0, "events": append([]string(nil), g.events...), "qr_expires": g.qrExpires.Unix(), "poll_after_seconds": g.pollAfter, "has_result": g.lastResult != ""}
 	out["credential_save_pending"] = len(g.pendingDAVCredentials)
 	out["credential_save_error"] = g.credentialSaveError
 	out["secret_storage_encrypted"] = localCredentialsEncrypted
 	dav := g.dav
 	g.mu.Unlock()
+	if diagnostic := g.safeEngineDiagnostic(engineErr, paths); diagnostic != nil {
+		out["engine_diagnostic"] = diagnostic
+		out["engine_error"] = diagnostic.Reason
+		out["stage"] = diagnostic.Title
+	}
 	if dav != nil {
 		out["webdav"] = dav.Status()
 	}
@@ -359,7 +372,7 @@ func respondJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func (g *guiApp) fail(w http.ResponseWriter, e error) {
-	respondJSON(w, 400, map[string]any{"ok": false, "error": e.Error()})
+	respondJSON(w, 400, map[string]any{"ok": false, "error": g.redactDAV(e.Error())})
 }
 func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -760,6 +773,7 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		return 1, e
 	}
 	app := &guiApp{stage: "正在启动原版引擎", accounts: map[string]guiAccount{}, downloads: map[string]guiDownload{}, data: *data, nonce: randomKey(), host: listener.Addr().String(), shutdown: cancel}
+	app.enginePaths = enginePaths{Executable: exe, SDK: *sdk, Bridge: *bridgePath, Data: *data}
 	app.runLog = newRuntimeLog(*data, app.redactDAV)
 	defer app.runLog.close()
 	app.quark = newQuarkManager(app)
@@ -772,11 +786,7 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	go func() {
 		b, e := startOriginalBridge(ctx, *sdk, *bridgePath, filepath.Join(*data, "original-sdk"))
 		if e != nil {
-			app.mu.Lock()
-			app.engineError = e.Error()
-			app.stage = "引擎启动失败"
-			app.mu.Unlock()
-			app.event("原版桥接启动失败")
+			app.recordEngineFailure(e)
 			return
 		}
 		app.mu.Lock()
@@ -784,6 +794,12 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		app.stage = "原版引擎已就绪"
 		app.mu.Unlock()
 		app.event("原版引擎初始化成功，使用独立测试数据目录")
+		go func() {
+			<-b.done
+			if ctx.Err() == nil {
+				app.recordEngineFailure(b.exitError())
+			}
+		}()
 		if identity, e := b.Call(ctx, map[string]any{"kind": "identity"}); e == nil {
 			app.mu.Lock()
 			app.identity = MobileConfig{AppID: identity.AppID, AppSecret: identity.AppSecret}

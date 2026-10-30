@@ -30,6 +30,14 @@
   <main class="main" id="main-content" tabindex="-1">
     <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <span id="breadcrumb-page">账号与登录</span></div><div class="top-meta" aria-label="运行状态"><span class="badge"><i class="dot" id="engine-dot"></i><span id="engine-label">引擎启动中</span></span><span class="badge"><i class="dot" id="account-dot"></i><span id="global-login">未登录</span></span><span class="badge"><i class="dot" id="dav-dot"></i><span id="global-dav">WebDAV 未启动</span></span></div></header>
     <div class="page-heading"><div><p class="eyebrow" id="page-eyebrow">连接与授权</p><h1 id="page-title">账号与登录</h1><p class="page-subtitle" id="page-subtitle">集中管理独立夸克账号、爆米花登录与备用授权。</p></div><button class="small secondary" data-go="diagnostics" data-log="run">查看运行日志 <span aria-hidden="true">↗</span></button></div>
+    <section class="banner error engine-failure hidden" id="engine-failure" role="alert" aria-labelledby="engine-failure-title">
+      <h2 id="engine-failure-title">网易引擎不可用</h2>
+      <p id="engine-failure-reason"></p>
+      <strong>处理办法</strong><ol id="engine-failure-steps"></ol>
+      <p class="engine-failure-scope">此故障影响爆米花登录及其绑定的移动、联通云盘；独立夸克登录仍可使用。</p>
+      <details id="engine-failure-details"><summary>具体错误与实际路径</summary><pre id="engine-failure-detail"></pre></details>
+      <div class="button-row"><button id="engine-copy-diagnostic" class="small">复制诊断信息</button><button class="small" data-go="diagnostics" data-log="run">查看运行日志</button><span id="engine-copy-status" role="status"></span></div>
+    </section>
     <div class="banner hidden" id="notice" role="status" aria-live="polite"></div>
     <div class="banner error hidden" id="credential-save-warning" role="alert"></div>
 
