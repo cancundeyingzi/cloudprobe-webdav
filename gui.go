@@ -728,14 +728,10 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		return 1, e
 	}
 	base := filepath.Dir(exe)
-	local, e := os.UserCacheDir()
-	if e != nil {
-		local = base
-	}
 	f := flags("gui", w)
 	sdk := f.String("sdk", filepath.Join(base, "sdk"), "原版组件目录")
 	bridgePath := f.String("bridge", filepath.Join(base, "bridge", "CloudProbe.Bridge.dll"), "桥接组件")
-	data := f.String("data", filepath.Join(local, "CloudProbeGUI"), "独立测试数据目录")
+	data := f.String("data", "data", "软件目录内的资料目录，默认 data；禁止软件目录外路径")
 	noOpen := f.Bool("no-open", false, "不自动打开浏览器")
 	port := f.Int("port", 0, "本机端口，0 自动分配")
 	if e = parseFlags(f, args); e != nil {
@@ -743,7 +739,20 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	}
 	*sdk, _ = filepath.Abs(*sdk)
 	*bridgePath, _ = filepath.Abs(*bridgePath)
-	*data, _ = filepath.Abs(*data)
+	*data, e = preparePortableData(base, *data)
+	if e != nil {
+		return 1, e
+	}
+	// Native SDK/browser helpers inherit a temporary directory inside the app.
+	tmp := filepath.Join(*data, "temp")
+	if e = os.MkdirAll(tmp, 0700); e != nil {
+		return 1, e
+	}
+	for _, key := range []string{"TEMP", "TMP", "TMPDIR"} {
+		if e = os.Setenv(key, tmp); e != nil {
+			return 1, e
+		}
+	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	listener, e := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))

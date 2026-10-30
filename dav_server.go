@@ -468,15 +468,20 @@ type davService struct {
 	auth                         *davAuthenticator
 	requestOnce                  sync.Once
 	requestSlots                 chan struct{}
+	bodyIdleTimeout              time.Duration
 }
 type davIncomingConnectionKey struct{}
 
 func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	inbound := newDAVInboundBody(w, r, s.bodyIdleTimeout)
+	r.Body = inbound
+	defer inbound.finish()
 	s.requestOnce.Do(func() { s.requestSlots = make(chan struct{}, 256) })
 	select {
 	case s.requestSlots <- struct{}{}:
 		defer func() { <-s.requestSlots }()
 	default:
+		w.Header().Set("Connection", "close")
 		http.Error(w, "请求队列已满，请稍后重试", http.StatusServiceUnavailable)
 		return
 	}
@@ -503,7 +508,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		localAddress = addr.String()
 	}
 	state.finish = func(success bool) error { return s.fs.finishBackups(r.Context(), state, success) }
-	rw := &davResponse{ResponseWriter: w, state: state, head: r.Method == "HEAD", redact: s.redact}
+	rw := &davResponse{ResponseWriter: w, state: state, head: r.Method == "HEAD", redact: s.redact, inbound: inbound}
 	rw.Header().Set("X-Content-Type-Options", "nosniff")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("X-CloudProbe-Request-ID", tr.id)
@@ -536,6 +541,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	if code := s.authenticationStatus(r); code != 0 {
+		rw.Header().Set("Connection", "close")
 		if code == http.StatusUnauthorized {
 			rw.Header().Set("WWW-Authenticate", `Basic realm="CloudProbe WebDAV", charset="UTF-8"`)
 			http.Error(rw, "需要 WebDAV 用户名和密码", code)
@@ -758,6 +764,7 @@ func (b *davBody) Read(p []byte) (int, error) {
 
 type davResponse struct {
 	http.ResponseWriter
+	inbound      *davInboundBody
 	state        *davRequestState
 	status       int
 	bytes        int64
@@ -768,6 +775,11 @@ type davResponse struct {
 func (w *davResponse) WriteHeader(code int) {
 	if w.status != 0 {
 		return
+	}
+	// net/http otherwise drains a small unread body after ServeHTTP returns,
+	// outside our request-slot limit and without a body read deadline.
+	if w.inbound != nil && !w.inbound.done {
+		w.Header().Set("Connection", "close")
 	}
 	if w.state.finish != nil {
 		finish := w.state.finish

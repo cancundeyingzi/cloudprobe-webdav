@@ -1,99 +1,116 @@
-
 name: Build and Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
-    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
-
-      - name: Verify WebDAV patch
-        run: git apply --reverse --check third_party/webdav.patch
-
-      - name: Run tests
-        run: go test -mod=vendor -count=1 -timeout=10m ./...
-
-      - name: Static analysis
-        run: go vet -mod=vendor ./...
-
-      - name: Race detection
-        if: runner.os == 'Linux'
+      - run: git apply --reverse --check third_party/webdav.patch
+      - run: go test -mod=vendor -count=1 -timeout=10m ./...
+      - run: go vet -mod=vendor ./...
+      - if: runner.os == 'Linux'
         run: go test -mod=vendor -race -count=1 -timeout=10m ./...
 
-  release:
-    name: Build and Publish
+  windows:
     needs: test
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Obtain authorized SDK
+        shell: pwsh
+        env:
+          SDK_URL: ${{ secrets.CLOUDPROBE_SDK_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!$env:SDK_URL -or ([Uri]$env:SDK_URL).Scheme -ne 'https') {
+            throw 'Configure CLOUDPROBE_SDK_URL with an authorized HTTPS SDK ZIP; an EXE-only package must not be published.'
+          }
+          $sdkRoot = Join-Path $env:RUNNER_TEMP 'cloudprobe-sdk'
+          New-Item -ItemType Directory -Path $sdkRoot | Out-Null
+          try { Invoke-WebRequest -Uri $env:SDK_URL -OutFile "$sdkRoot.zip" } catch { throw 'SDK download failed; check CLOUDPROBE_SDK_URL.' }
+          Expand-Archive -LiteralPath "$sdkRoot.zip" -DestinationPath $sdkRoot
+          "CLOUDPROBE_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
+      - name: Build full package and verify engine startup
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ./scripts/package-windows.ps1 -SdkPath $env:CLOUDPROBE_SDK_PATH -OutputRoot "$env:GITHUB_WORKSPACE/dist" -ExpectedTag $env:RELEASE_TAG
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: dist/*.zip
+          if-no-files-found: error
 
-      - name: Cross compile
+  linux:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build Linux command line packages
         shell: bash
         run: |
+          set -euo pipefail
+          version=$(sed -n 's/^const version = "\([^"]*\)"/\1/p' main.go)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then exit 1; fi
           mkdir -p dist
-
-          for target in windows/amd64 linux/amd64 linux/arm64; do
-            os="${target%/*}"
-            arch="${target#*/}"
-            name="CloudProbe_${GITHUB_REF_NAME}_${os}_${arch}"
-
-            if [ "$os" = "windows" ]; then
-              binary="dist/${name}.exe"
-            else
-              binary="dist/${name}"
-            fi
-
-            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-              go build -mod=vendor -trimpath \
-              -ldflags="-s -w" -o "$binary" .
-
-            if [ "$os" = "windows" ]; then
-              zip -j "dist/${name}.zip" "$binary"
-              rm "$binary"
-            else
-              tar -C dist -czf "dist/${name}.tar.gz" "$name"
-              rm "$binary"
-            fi
+          for arch in amd64 arm64; do
+            name="CloudProbe_v${version}_linux_${arch}"
+            mkdir -p "dist/$name"
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags='-s -w' -o "dist/$name/cloudprobe" .
+            printf '%s\n' 'Linux command line package. The original Windows SDK engine is not included or supported on Linux.' > "dist/$name/README.txt"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
           done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum *.zip *.tar.gz > SHA256SUMS
-
-      - name: Publish GitHub Release
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish verified packages
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/* \
-            --generate-notes \
-            --verify-tag
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/* --generate-notes --verify-tag

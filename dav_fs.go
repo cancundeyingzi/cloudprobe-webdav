@@ -300,11 +300,18 @@ func (f *davFS) RemoveAll(ctx context.Context, name string) error {
 		clean, _ := davPath(name)
 		if clean == s.destination {
 			backupName := "CloudProbe-backup-" + randomKey()[:12] + path.Ext(n.entry.Name)
+			b := davBackup{mount: n.mount, entry: n.entry, parent: n.parent, target: clean, backupName: backupName}
+			// Register before dispatch: an error may be a lost acknowledgement.
+			s.backups = append(s.backups, b)
+			defer f.invalidate(n.mount)
 			if e = n.mount.drive.Move(ctx, n.entry, "", backupName); e != nil {
-				return davCloudError(ctx, e)
+				checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+				target, backup, checkErr := b.snapshot(checkCtx)
+				cancel()
+				if checkErr != nil || target != nil || backup == nil || !sameCheckpointObject(*backup, b.entry) || ctx.Err() != nil {
+					return davCloudError(ctx, fmt.Errorf("目标备份结果未确认；原路径 %s，待核验备份 %s：%w", clean, backupName, errors.Join(e, checkErr)))
+				}
 			}
-			s.backups = append(s.backups, davBackup{mount: n.mount, entry: n.entry, parent: n.parent, target: clean, backupName: backupName})
-			f.invalidate(n.mount)
 			return nil
 		}
 	}
@@ -757,29 +764,38 @@ func (f *davFS) finishBackups(ctx context.Context, s *davRequestState, success b
 			return reserveErr
 		}
 		e := func() error {
+			target, backup, e := b.snapshot(cleanup)
+			if e != nil {
+				return fmt.Errorf("目标及备份无法核验；原路径 %s，待核验备份 %s：%w", b.target, b.backupName, e)
+			}
+			if backup == nil && !success && target != nil && sameCheckpointObject(*target, b.entry) {
+				return nil // Backup rename was not executed, or restoration already succeeded.
+			}
+			if backup == nil || !sameCheckpointObject(*backup, b.entry) {
+				return fmt.Errorf("备份身份或版本无法确认，未执行清理或恢复；原路径 %s，待核验备份 %s", b.target, b.backupName)
+			}
 			if success {
-				if e := m.drive.Remove(cleanup, b.entry); e != nil {
+				if target == nil || s.created[b.target] == "" || s.created[b.target] != target.ID {
+					return fmt.Errorf("提交目标身份无法确认；旧内容保留于 %s", b.backupName)
+				}
+				if e := b.nativeDrive().Remove(cleanup, *backup); e != nil {
 					return fmt.Errorf("目标已提交，但旧内容备份 %s 未清理：%w", b.backupName, e)
 				}
 				return nil
 			}
-			f.invalidate(m)
-			current, e := f.lookup(cleanup, b.target)
-			if e == nil {
-				if s.created[b.target] != current.entry.ID {
+			if target != nil {
+				if s.created[b.target] == "" || s.created[b.target] != target.ID {
 					return fmt.Errorf("操作失败，目标路径已被其他操作占用；旧内容保留于 %s", b.backupName)
 				}
-				partial := "CloudProbe-partial-" + randomKey()[:12] + path.Ext(current.entry.Name)
-				if e = m.drive.Move(cleanup, current.entry, "", partial); e != nil {
+				partial := "CloudProbe-partial-" + randomKey()[:12] + path.Ext(target.Name)
+				if e = b.nativeDrive().Move(cleanup, *target, "", partial); e != nil {
 					return fmt.Errorf("保留未完成目标失败；原内容仍在 %s：%w", b.backupName, e)
 				}
-			} else if !os.IsNotExist(e) {
-				return fmt.Errorf("目标状态无法确认；原内容保留于 %s：%w", b.backupName, e)
 			}
-			restore := b.entry
-			restore.Name = b.backupName
-			if e = m.drive.Move(cleanup, restore, "", b.entry.Name); e != nil {
-				return fmt.Errorf("恢复原目标名称失败；旧内容保留于 %s：%w", b.backupName, e)
+			moveErr := b.nativeDrive().Move(cleanup, *backup, "", b.entry.Name)
+			target, backup, e = b.snapshot(cleanup)
+			if e != nil || target == nil || !sameCheckpointObject(*target, b.entry) || backup != nil {
+				return fmt.Errorf("恢复原目标名称未确认；原路径 %s，待核验备份 %s：%w", b.target, b.backupName, errors.Join(moveErr, e, errors.New("恢复后的对象关系未确认")))
 			}
 			return nil
 		}()

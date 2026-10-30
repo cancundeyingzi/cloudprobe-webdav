@@ -14,7 +14,7 @@ import (
 	"syscall"
 )
 
-const version = "1.12.3"
+const version = "1.12.5"
 
 type namesFlag []string
 
@@ -72,7 +72,7 @@ func run(ctx context.Context, args []string, w io.Writer) (int, error) {
 func initCommand(args []string, w io.Writer) (int, error) {
 	f := flags("init", w)
 	p := f.String("provider", "mobile", "mobile 或 wopan")
-	out := f.String("out", "config.mobile.json", "写入配置文件，拒绝覆盖")
+	out := f.String("out", defaultLocalPath("config.mobile.json"), "写入配置文件，拒绝覆盖")
 	transport := f.String("transport", "", "direct、netease 或 gateway")
 	dll := f.String("native-dll", "", "可选：已分析版本的 ntkernel.dll 路径")
 	if e := parseFlags(f, args); e != nil {
@@ -92,6 +92,9 @@ func initCommand(args []string, w io.Writer) (int, error) {
 		return 2, e
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
+	if e := os.MkdirAll(filepath.Dir(*out), 0700); e != nil {
+		return 1, e
+	}
 	if e := writeNew(*out, b); e != nil {
 		return 1, e
 	}
@@ -100,9 +103,9 @@ func initCommand(args []string, w io.Writer) (int, error) {
 }
 func onlineCommand(ctx context.Context, command string, args []string, w io.Writer) (int, error) {
 	f := flags(command, w)
-	config := f.String("config", "config.mobile.json", "配置文件")
+	config := f.String("config", defaultLocalPath("config.mobile.json"), "配置文件")
 	dir := f.String("dir", "root", "查询目录 ID，不递归")
-	out := f.String("out", "results", "结果根目录，每次新建子目录")
+	out := f.String("out", defaultLocalPath("results"), "结果根目录，每次新建子目录")
 	id := f.String("id", "", "文件 ID / contentID")
 	fid := f.String("fid", "", "联通下载 fid，可省略并用 id 查询")
 	name := f.String("name", "download.bin", "下载保存文件名")
@@ -199,7 +202,7 @@ func filterCommand(args []string, w io.Writer) (int, error) {
 	f := flags("filter", w)
 	input := f.String("input", "", "目录响应 JSON/XML，或本工具 report.json")
 	p := f.String("provider", "", "mobile 或 wopan；报告可自动识别")
-	out := f.String("out", "results", "输出根目录")
+	out := f.String("out", defaultLocalPath("results"), "输出根目录")
 	var expected namesFlag
 	f.Var(&expected, "expect", "预期文件名，可重复")
 	if e := parseFlags(f, args); e != nil {
@@ -271,7 +274,7 @@ func filterCommand(args []string, w io.Writer) (int, error) {
 }
 func demoCommand(ctx context.Context, args []string, w io.Writer) (int, error) {
 	f := flags("demo", w)
-	out := f.String("out", "results-demo", "演示结果根目录")
+	out := f.String("out", defaultLocalPath("results-demo"), "演示结果根目录")
 	if e := parseFlags(f, args); e != nil {
 		return 2, e
 	}

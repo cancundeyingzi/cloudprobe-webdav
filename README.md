@@ -15,6 +15,8 @@ CloudProbe 将网易爆米花绑定的联通/移动云盘及独立登录的夸�
 
 1.12.3 增加独立的本地正文清理记录与旧云端事务核验。上传成功但本地清理失败时可单独重试；重建或放弃待提交任务前保留并核验旧对象关系，详见 [正文归属与旧事务收敛](docs/正文归属与旧事务收敛.md)。
 
+1.12.5 默认将全部 GUI 运行资料保存在 EXE 旁的 `data/`，不再使用 AppData。相对 `--data` 也以 EXE 目录为基准，禁止指向软件目录外；目录不可写时直接报错。账号、配置、日志、登录浏览器资料、上传正文及续传状态、SDK 与子进程临时资料均随软件目录保存。命令行的默认配置及结果也放在软件目录内；显式导出结果仍以用户选择的输出位置为准。退出程序后删除软件目录即可移除本程序管理的数据，升级时保留原 `data/`。
+
 ## 项目结构
 
 - 根目录 Go 文件：客户端、驱动、WebDAV 服务和测试。
@@ -44,7 +46,19 @@ GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号�
 .\bridge\build.ps1 -SdkPath C:\path\to\authorized-sdk
 ```
 
-启动 GUI 时通过 `--sdk` 和 `--bridge` 指向 SDK 目录及 `bridge\build\CloudProbe.Bridge.dll`；通过 `--data` 指定本机资料目录。不要将资料目录、加密账号 vault 或运行日志提交到版本库。
+启动 GUI 时通过 `--sdk` 和 `--bridge` 指向 SDK 目录及 `bridge\build\CloudProbe.Bridge.dll`；完整运行包已带上两个目录，直接双击 EXE 即可。`--data` 只能指定软件目录内的资料目录。不要将资料目录、加密账号 vault 或运行日志提交到版本库。
+
+## 完整打包与 Release
+
+Windows PowerShell 7 下运行：
+
+```powershell
+.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.5
+```
+
+脚本从源码编译 EXE 与 Bridge，按明确组件清单装配 SDK，使用默认 `data/` 验证真实引擎启动后清理测试资料并打包。输出 ZIP 不包含账号资料；Windows 仍需 .NET 8 x64 运行时。
+
+`.github/workflows/release.yml` 在推送 `v*` 标签时运行跨平台测试、构建并发布；标签必须与 `main.go` 版本一致。手动触发只验证及上传 Actions 构建产物，不创建公开 Release。Windows 完整包构建需要仓库 Secret `CLOUDPROBE_SDK_URL`：一个授权的 HTTPS SDK ZIP 地址，ZIP 根目录直接包含打包脚本列出的 SDK DLL 及许可文件。缺少地址或组件、引擎启动失败时整个发布会停止，不会退化成 EXE 单文件包。Linux 产物明确为命令行包，不含 Windows SDK 引擎。
 
 ## 运行实网测试
 
