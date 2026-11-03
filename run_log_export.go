@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 )
 
 var runtimeLogExportName = regexp.MustCompile(`^export-\d{8}-\d{6}-[0-9a-f]{8}\.tmp$`)
@@ -31,15 +32,25 @@ func clearRuntimeLogExports(dir string) error {
 }
 
 // Caller holds exportMu until the HTTP response is finished. Only bounded local
-// copying holds mu; no source log handle survives into the network transfer.
+// copying holds diskMu; no source log handle survives into the network transfer.
 func (l *runtimeLog) exportSnapshot(ctx context.Context) (snapshot *os.File, size int64, err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err = l.flush(ctx); err != nil {
+		return nil, 0, errors.Join(errLogQueueBusy, err)
+	}
+	if err = l.lockDisk(ctx); err != nil {
+		return nil, 0, err
+	}
+	defer l.diskMu.Unlock()
 	defer func() {
 		l.exportErr = ""
 		if err != nil {
 			l.exportErr = err.Error()
 		}
+		message := l.exportErr
+		l.exportStatus.Store(&message)
+		l.publishDiskStatus()
 	}()
 	if err = ctx.Err(); err != nil {
 		return nil, 0, err
@@ -103,8 +114,7 @@ func (l *runtimeLog) closeExportSnapshot(file *os.File) {
 		removeErr = nil
 	}
 	if err := errors.Join(closeErr, removeErr); err != nil {
-		l.mu.Lock()
-		l.exportErr = "日志导出快照清理失败：" + err.Error()
-		l.mu.Unlock()
+		message := "日志导出快照清理失败：" + err.Error()
+		l.exportStatus.Store(&message)
 	}
 }

@@ -390,7 +390,19 @@ func (d *quarkDAVDrive) task(ctx context.Context, route quarkRoute, data map[str
 		}
 	}
 }
-func (d *quarkDAVDrive) mutate(ctx context.Context, operation string, webBody, openBody map[string]any, webPath, openPath string) (map[string]any, error) {
+func (d *quarkDAVDrive) mutate(ctx context.Context, operation string, webBody, openBody map[string]any, webPath, openPath string, proof ...func(context.Context, map[string]any) error) (map[string]any, error) {
+	uncertain := func(out map[string]any, err error) (map[string]any, error) {
+		if len(proof) > 0 {
+			check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if checkErr := proof[0](check, out); checkErr == nil {
+				return out, nil
+			} else {
+				err = errors.Join(err, checkErr)
+			}
+		}
+		return nil, &davMutationError{Phase: operation, Err: err}
+	}
 	var last error
 	for _, route := range d.metadataRoutes(operation) {
 		path, body := webPath, webBody
@@ -416,13 +428,13 @@ func (d *quarkDAVDrive) mutate(ctx context.Context, operation string, webBody, o
 				d.metadataHealth.good(string(route) + ":" + operation)
 				return m, nil
 			}
-			return nil, &davMutationError{Phase: operation, Err: err}
+			return uncertain(m, err)
 		}
 		finish(err)
 		last = err
 		d.metadataHealth.bad(string(route) + ":" + operation)
-		if !quarkRejected(err) {
-			return nil, &davMutationError{Phase: operation, Err: err}
+		if !quarkMutationRejected(err) {
+			return uncertain(nil, err)
 		}
 		logFallback(ctx, route.label(), "其他已授权夸克通道", err)
 	}
@@ -431,17 +443,33 @@ func (d *quarkDAVDrive) mutate(ctx context.Context, operation string, webBody, o
 	}
 	return nil, &davNotExecuted{last}
 }
+func quarkMutationRejected(err error) bool {
+	var rejected *quarkAPIError
+	return errors.As(err, &rejected) && rejected.Rejected && quarkAuthCode(rejected.Code)
+}
 func (d *quarkDAVDrive) Mkdir(ctx context.Context, parent, name string) (davEntry, error) {
 	if err := safeFilename(name); err != nil {
 		return davEntry{}, err
 	}
-	out, err := d.mutate(ctx, "新建目录", map[string]any{"pdir_fid": parent, "file_name": name, "dir_path": "", "dir_init_lock": false}, map[string]any{"pdir_fid": parent, "dir_path": name}, "/file", "/open/v1/dir")
+	out, err := d.mutate(ctx, "新建目录", map[string]any{"pdir_fid": parent, "file_name": name, "dir_path": "", "dir_init_lock": false}, map[string]any{"pdir_fid": parent, "dir_path": name}, "/file", "/open/v1/dir", func(check context.Context, out map[string]any) error {
+		id := quarkStr(out, "fid")
+		if file, ok := out["file"].(map[string]any); ok {
+			id = quarkStr(file, "fid")
+		}
+		if id == "" {
+			return errors.New("创建结果缺少可靠对象 ID，未按同名目录推断成功，也未重放创建")
+		}
+		return d.verifyMutation(check, parent, id, name, false)
+	})
 	if err != nil {
 		return davEntry{}, err
 	}
 	id := quarkStr(out, "fid")
 	if m, ok := out["file"].(map[string]any); ok {
 		id = quarkStr(m, "fid")
+	}
+	if id == "" {
+		return davEntry{}, &davMutationError{Phase: "新建目录核验", Err: errors.New("创建响应缺少对象 ID，请刷新目录核对；未重放创建")}
 	}
 	for attempt := 0; attempt < 6; attempt++ {
 		entries, err := d.List(ctx, parent)
@@ -463,7 +491,15 @@ func (d *quarkDAVDrive) Mkdir(ctx context.Context, parent, name string) (davEntr
 
 }
 func (d *quarkDAVDrive) Remove(ctx context.Context, it davEntry) error {
-	_, err := d.mutate(ctx, "删除到回收站", map[string]any{"action_type": 1, "filelist": []string{it.ID}, "exclude_fids": []string{}}, map[string]any{"action_type": 1, "fid_list": []string{it.ID}}, "/file/delete", "/open/v1/file/delete")
+	_, err := d.mutate(ctx, "删除到回收站", map[string]any{"action_type": 1, "filelist": []string{it.ID}, "exclude_fids": []string{}}, map[string]any{"action_type": 1, "fid_list": []string{it.ID}}, "/file/delete", "/open/v1/file/delete", func(check context.Context, _ map[string]any) error {
+		if it.Parent == "" {
+			return errors.New("删除结果缺少父目录上下文，未重放")
+		}
+		if e := d.verifyMutation(check, it.Parent, it.ID, "", true); e != nil {
+			return e
+		}
+		return errors.New("原目录已无该对象 ID，但未能确认回收站结果，未重放删除；请核对云端状态")
+	})
 	if err != nil {
 		return err
 	}
@@ -504,14 +540,21 @@ func (d *quarkDAVDrive) Move(ctx context.Context, it davEntry, parent, name stri
 	}
 	changed := false
 	if name != it.Name {
-		_, err := d.mutate(ctx, "重命名", map[string]any{"fid": it.ID, "file_name": name}, map[string]any{"fid": it.ID, "file_name": name, "conflict_mode": "FAIL"}, "/file/rename", "/open/v1/file/rename")
+		_, err := d.mutate(ctx, "重命名", map[string]any{"fid": it.ID, "file_name": name}, map[string]any{"fid": it.ID, "file_name": name, "conflict_mode": "FAIL"}, "/file/rename", "/open/v1/file/rename", func(check context.Context, _ map[string]any) error {
+			if it.Parent == "" {
+				return errors.New("缺少原父目录，无法按 ID 核验改名")
+			}
+			return d.verifyMutation(check, it.Parent, it.ID, name, false)
+		})
 		if err != nil {
 			return err
 		}
 		changed = true
 	}
 	if parent != "" && parent != it.Parent {
-		_, err := d.mutate(ctx, "移动", map[string]any{"action_type": 1, "filelist": []string{it.ID}, "exclude_fids": []string{}, "to_pdir_fid": parent}, map[string]any{"action_type": 1, "fid_list": []string{it.ID}, "to_pdir_fid": parent}, "/file/move", "/open/v1/file/move")
+		_, err := d.mutate(ctx, "移动", map[string]any{"action_type": 1, "filelist": []string{it.ID}, "exclude_fids": []string{}, "to_pdir_fid": parent}, map[string]any{"action_type": 1, "fid_list": []string{it.ID}, "to_pdir_fid": parent}, "/file/move", "/open/v1/file/move", func(check context.Context, _ map[string]any) error {
+			return d.verifyMutation(check, parent, it.ID, name, false)
+		})
 		if err != nil {
 			if changed {
 				return &davMutationError{Phase: "改名后的移动", Partial: true, Err: err}

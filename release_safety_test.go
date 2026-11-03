@@ -502,6 +502,7 @@ func TestReleaseRuntimeLogRotationRetentionAndExport(t *testing.T) {
 	}
 	for range 80 {
 		l.add(runLogEntry{Operation: "fixture", Result: "ok", Detail: strings.Repeat("a", 80)})
+		flushTestLog(t, l)
 	}
 	if l.err != "" {
 		t.Fatal(l.err)

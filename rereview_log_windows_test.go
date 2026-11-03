@@ -15,6 +15,7 @@ func TestReReviewWindowsRetentionRecoversAfterFileReleased(t *testing.T) {
 	defer l.close()
 	l.maxFileBytes, l.maxTotalBytes, l.maxFiles = 512, 1024, 2
 	l.add(runLogEntry{Operation: "held-segment"})
+	flushTestLog(t, l)
 	file, err := os.Open(l.path)
 	if err != nil {
 		t.Fatal(err)
@@ -22,6 +23,7 @@ func TestReReviewWindowsRetentionRecoversAfterFileReleased(t *testing.T) {
 	defer file.Close()
 	for range 30 {
 		l.add(runLogEntry{Operation: "fill", Detail: strings.Repeat("x", 200)})
+		flushTestLog(t, l)
 	}
 	status := l.status()
 	if status["disk_paused"] != true || status["retention_error"] == "" {
@@ -43,6 +45,7 @@ func TestReReviewWindowsRetentionRecoversAfterFileReleased(t *testing.T) {
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		l.add(runLogEntry{Operation: "recovered-disk-record"})
+		flushTestLog(t, l)
 		data, readErr := os.ReadFile(l.path)
 		if readErr == nil && bytes.Contains(data, []byte("recovered-disk-record")) {
 			status = l.status()
@@ -92,6 +95,7 @@ func TestReReviewWindowsStartupRetentionAndNonblockingWarning(t *testing.T) {
 			l := newRuntimeLog(profile, nil)
 			defer l.close()
 			l.add(runLogEntry{Operation: "startup-record"})
+			flushTestLog(t, l)
 			status := l.status()
 			if status["error"] != "" || status["disk_paused"] != full || status["retention_error"] == "" {
 				t.Fatalf("wrong startup retention state: %v", status)
@@ -108,6 +112,7 @@ func TestReReviewWindowsStartupRetentionAndNonblockingWarning(t *testing.T) {
 			deadline := time.Now().Add(4 * time.Second)
 			for time.Now().Before(deadline) {
 				l.add(runLogEntry{Operation: "startup-recovered"})
+				flushTestLog(t, l)
 				status = l.status()
 				if status["disk_paused"] == false && status["retention_error"] == "" {
 					data, err := os.ReadFile(l.path)

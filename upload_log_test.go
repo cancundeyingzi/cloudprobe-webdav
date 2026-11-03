@@ -154,6 +154,7 @@ func TestRuntimeLogPersistenceRedactionAndPagination(t *testing.T) {
 	defer l.close()
 	for i := 0; i < 815; i++ {
 		l.add(runLogEntry{Operation: "读取目录", Source: "网易代理", Result: "成功", Path: "/mount/readme.txt", Detail: "private-user-token https://node.test/opaque-signature/file?key=very-private", Items: []runLogItem{{Name: "说明.txt", Size: 123}}})
+		flushTestLog(t, l)
 	}
 	b, err := os.ReadFile(l.path)
 	if err != nil {

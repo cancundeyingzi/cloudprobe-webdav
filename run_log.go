@@ -63,6 +63,15 @@ type runLogItem struct {
 }
 type runtimeLog struct {
 	mu                                     sync.Mutex
+	diskMu                                 sync.Mutex
+	queue                                  chan logDiskWork
+	queueBytes                             int64
+	done                                   chan struct{}
+	diskStatus                             atomic.Pointer[logDiskStatus]
+	diskBusy                               atomic.Bool
+	closePending                           atomic.Bool
+	exportStatus                           atomic.Pointer[string]
+	writeRecord                            func([]byte) (int, error)
 	exportMu                               sync.Mutex
 	file                                   *os.File
 	path                                   string
@@ -72,7 +81,7 @@ type runtimeLog struct {
 	err                                    string
 	retentionErr, exportErr                string
 	diskPaused, closed                     bool
-	dropped                                uint64
+	dropped                                atomic.Uint64
 	retentionRetry                         time.Time
 	clean                                  func(string) string
 	fileBytes, maxFileBytes, maxTotalBytes int64
@@ -96,6 +105,10 @@ func newRuntimeLog(profile string, clean func(string) string) *runtimeLog {
 			}
 		}
 	}
+	l.publishDiskStatus()
+	l.queue = make(chan logDiskWork, 256)
+	l.done = make(chan struct{})
+	go l.diskLoop()
 	return l
 }
 func (l *runtimeLog) sanitize(s string) string {
@@ -144,29 +157,42 @@ func (l *runtimeLog) add(e runLogEntry) {
 	if len(l.entries) > 800 {
 		l.entries = l.entries[len(l.entries)-800:]
 	}
-	if l.closed || l.err != "" {
-		l.dropped++
-		return
-	}
-	if l.diskPaused && time.Now().Before(l.retentionRetry) {
-		l.dropped++
+	if l.closed {
+		l.dropped.Add(1)
 		return
 	}
 	data, err := json.Marshal(e)
 	if err != nil {
-		l.err = err.Error()
-		l.dropped++
+		l.dropped.Add(1)
 		return
 	}
 	data = append(data, '\n')
+	if l.queueBytes+int64(len(data)) > 8<<20 {
+		l.dropped.Add(1)
+		return
+	}
+	select {
+	case l.queue <- logDiskWork{data: data}:
+		l.queueBytes += int64(len(data))
+	default:
+		l.dropped.Add(1)
+	}
+}
+
+func (l *runtimeLog) writeEntry(data []byte) {
+	if l.err != "" || l.diskPaused && time.Now().Before(l.retentionRetry) {
+		l.dropped.Add(1)
+		return
+	}
+	var err error
 	if int64(len(data)) > l.maxFileBytes {
-		l.dropped++
+		l.dropped.Add(1)
 		return
 	}
 	rotate := l.file != nil && l.fileBytes+int64(len(data)) > l.maxFileBytes
 	if rotate || l.file == nil || l.diskPaused || (l.retentionErr != "" && !time.Now().Before(l.retentionRetry)) {
 		if !l.checkRetentionLocked(rotate) {
-			l.dropped++
+			l.dropped.Add(1)
 			return
 		}
 	}
@@ -177,34 +203,17 @@ func (l *runtimeLog) add(e runLogEntry) {
 	}
 	if err == nil {
 		var n int
-		n, err = l.file.Write(data)
+		if l.writeRecord != nil {
+			n, err = l.writeRecord(data)
+		} else {
+			n, err = l.file.Write(data)
+		}
 		l.fileBytes += int64(n)
 	}
 	if err != nil {
 		l.err = err.Error()
-		l.dropped++
+		l.dropped.Add(1)
 	}
-}
-func (l *runtimeLog) close() {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.closed = true
-	if l.file != nil {
-		_ = l.file.Sync()
-		_ = l.file.Close()
-		l.file = nil
-	}
-}
-func (l *runtimeLog) status() map[string]any {
-	if l == nil {
-		return map[string]any{}
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return map[string]any{"run_id": l.runID, "last_id": l.seq, "file": l.path, "error": l.err, "retention_error": l.retentionErr, "export_error": l.exportErr, "disk_paused": l.diskPaused, "dropped_entries": l.dropped, "file_limit_bytes": l.maxFileBytes, "total_limit_bytes": l.maxTotalBytes, "export_limit_bytes": l.maxTotalBytes, "retained_files": len(l.segments)}
 }
 
 type runTraceKey struct{}
@@ -348,8 +357,13 @@ func (g *guiApp) runLogAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	gap := len(l.entries) > 0 && after+1 < l.entries[0].ID
-	last, runID, fileError := l.seq, l.runID, l.err
-	retentionError, exportError, paused, dropped := l.retentionErr, l.exportErr, l.diskPaused, l.dropped
+	last, runID := l.seq, l.runID
 	l.mu.Unlock()
-	respondJSON(w, 200, map[string]any{"entries": rows, "last_id": last, "run_id": runID, "gap": gap, "file_error": fileError, "retention_error": retentionError, "export_error": exportError, "disk_paused": paused, "dropped_entries": dropped})
+	status := l.status()
+	status["entries"] = rows
+	status["last_id"] = last
+	status["run_id"] = runID
+	status["gap"] = gap
+	status["file_error"] = status["error"]
+	respondJSON(w, 200, status)
 }

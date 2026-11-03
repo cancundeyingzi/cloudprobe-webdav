@@ -91,17 +91,13 @@ type davManager struct {
 	activity         []davActivity
 	active           int
 	lastError        string
+	configError      string
 	transfers        *transferRuntime
 }
 
 func newDAVManager(g *guiApp) *davManager {
 	d := &davManager{app: g}
-	b, e := os.ReadFile(filepath.Join(g.data, "webdav.json"))
-	if e == nil {
-		_ = json.Unmarshal(b, &d.config)
-	} else if errors.Is(e, os.ErrNotExist) {
-		d.config.TransferScheduling = "client"
-	}
+	_ = d.loadConfig()
 	return d
 }
 func davIdentity(a guiAccount) string {
@@ -143,7 +139,7 @@ func (d *davManager) Status() map[string]any {
 		}
 		d.app.mu.Unlock()
 	}
-	return map[string]any{"running": d.server != nil, "listen": d.config.Listen, "port": d.config.Port, "username": d.config.Username, "has_password": d.config.PasswordHash != "", "max_upload_mib": d.config.MaxUploadMiB, "upload_concurrency": uploadConcurrency(d.config.UploadConcurrency), "upload_mode": uploadMode(d.config.UploadMode), "transfer_settings": d.config.transferOptions.defaults(), "transfer_queues": d.transfers.status(), "urls": append([]string{}, d.urls...), "mounts": mounts, "saved_mounts": saved, "activity": append([]davActivity{}, d.activity...), "active": d.active, "last_error": d.lastError}
+	return map[string]any{"running": d.server != nil, "listen": d.config.Listen, "port": d.config.Port, "username": d.config.Username, "has_password": d.config.PasswordHash != "", "max_upload_mib": d.config.MaxUploadMiB, "upload_concurrency": uploadConcurrency(d.config.UploadConcurrency), "upload_mode": uploadMode(d.config.UploadMode), "transfer_settings": d.config.transferOptions.defaults(), "transfer_queues": d.transfers.status(), "urls": append([]string{}, d.urls...), "mounts": mounts, "saved_mounts": saved, "activity": append([]davActivity{}, d.activity...), "active": d.active, "last_error": d.lastError, "config_error": d.configError}
 }
 func (d *davManager) Stop() {
 	if d == nil {
@@ -172,10 +168,28 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	d.mu.Lock()
 	previous := d.config
 	running := d.server != nil
+	configError := d.configError
 	d.mu.Unlock()
 	if running {
 		return nil, errors.New("WebDAV 已运行，请先停止后更改设置")
 	}
+	if configError != "" {
+		return nil, errors.New(configError)
+	}
+	if err := os.MkdirAll(d.app.data, 0700); err != nil {
+		return nil, err
+	}
+	lease, err := lockCheckpointCatalog(ctx, filepath.Join(d.app.data, "webdav-config.lock"))
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Close()
+	if err = d.loadConfig(); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	previous = d.config
+	d.mu.Unlock()
 	if in.Listen == "" {
 		in.Listen = "127.0.0.1"
 	}
@@ -895,6 +909,26 @@ func (g *guiApp) davAPI(w http.ResponseWriter, r *http.Request) {
 		g.dav.Stop()
 		g.event("WebDAV 已停止")
 		respondJSON(w, 200, g.dav.Status())
+		return
+	}
+	if r.URL.Path == "/api/webdav/config/reload" || r.URL.Path == "/api/webdav/config/reset" {
+		reset := r.URL.Path == "/api/webdav/config/reset"
+		if reset {
+			var in struct {
+				Confirm bool `json:"confirm"`
+			}
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+			if dec.Decode(&in) != nil || !in.Confirm {
+				http.Error(w, "需明确确认备份并重置配置", 400)
+				return
+			}
+		}
+		backup, err := g.dav.recoverConfig(r.Context(), reset)
+		if err != nil {
+			g.fail(w, err)
+			return
+		}
+		respondJSON(w, 200, map[string]any{"ok": true, "backup": backup, "status": g.dav.Status()})
 		return
 	}
 	if r.URL.Path != "/api/webdav/start" {

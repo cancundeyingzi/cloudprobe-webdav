@@ -81,7 +81,7 @@ type guiApp struct {
 	pendingDAVCredentials map[string]davCredential
 	credentialSaveError   string
 	credentialRetry       *time.Timer
-	browseEntries         map[string]map[string]davEntry
+	browseSnapshots       map[string]guiBrowseSnapshot
 	accountOrder          []string
 	identity              MobileConfig
 	data                  string
@@ -477,12 +477,14 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Account   string `json:"account"`
-		Directory string `json:"directory"`
-		Expected  string `json:"expected"`
-		ID        string `json:"id"`
-		FID       string `json:"fid"`
-		Name      string `json:"name"`
+		Account      string `json:"account"`
+		Directory    string `json:"directory"`
+		Snapshot     string `json:"snapshot"`
+		AllowCurrent bool   `json:"allow_current"`
+		Expected     string `json:"expected"`
+		ID           string `json:"id"`
+		FID          string `json:"fid"`
+		Name         string `json:"name"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	d := json.NewDecoder(r.Body)
@@ -582,6 +584,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		var report Report
 		var nativeEntries []davEntry
+		snapshotID := ""
 		if account.Provider == "quark" {
 			report = newReport("quark", "live-native", input.Directory)
 			drive, _, driveErr := g.guiReadDrive(input.Account, cl)
@@ -617,6 +620,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				var entries []davEntry
 				entries, de = drive.List(logCtx, input.Directory)
 				if de == nil {
+					nativeEntries = entries
 					report.Items = nil
 					for _, it := range entries {
 						report.Items = append(report.Items, classify(account.Provider, it.Item))
@@ -635,19 +639,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					backup.remember(report.Directory, mobileDAVEntries(report.Items))
 				}
 			}
-			g.mu.Lock()
-			if g.browseEntries == nil {
-				g.browseEntries = map[string]map[string]davEntry{}
-			}
-			known := map[string]davEntry{}
-			for _, it := range report.Items {
-				known[it.ID] = davEntry{Item: it}
-			}
-			for _, it := range nativeEntries {
-				known[it.ID] = it
-			}
-			g.browseEntries[input.Account] = known
-			g.mu.Unlock()
+			snapshotID, e = g.storeBrowseSnapshot(input.Account, report.Directory, report.Items, nativeEntries)
 		}
 		if se := saveReport(cl.folder, report, cl.redact); se != nil {
 			g.fail(w, se)
@@ -661,7 +653,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.event(fmt.Sprintf("目录查询完成，返回 %d 条记录", len(report.Items)))
-		respondJSON(w, 200, map[string]any{"ok": true, "report": report})
+		respondJSON(w, 200, map[string]any{"ok": true, "report": report, "snapshot": snapshotID})
 	case "/api/fetch":
 		cl, e := g.accountClient(input.Account)
 		if e != nil {
@@ -677,14 +669,25 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.fail(w, e)
 			return
 		}
-		g.mu.Lock()
-		entry, known := g.browseEntries[input.Account][input.ID]
-		g.mu.Unlock()
-		if !known {
-			g.fail(w, errors.New("请重新查询目录后选择文件"))
+		entry, e := g.snapshotEntry(input.Account, input.Directory, input.Snapshot, input.ID)
+		if e != nil {
+			g.fail(w, e)
 			return
 		}
-		receipt, e := guiFetchRedundant(logCtx, drive, runtime, cl, entry, input.Name)
+		entry, e = verifyGUIEntry(logCtx, drive, input.Directory, entry, input.AllowCurrent)
+		if e != nil {
+			var unavailable *guiVersionUnavailable
+			if errors.As(e, &unavailable) {
+				respondJSON(w, 409, map[string]any{"ok": false, "code": "version_unavailable", "error": e.Error()})
+				return
+			}
+			g.fail(w, e)
+			return
+		}
+		receipt, e := guiFetchRedundant(logCtx, drive, runtime, cl, entry, input.Name, func() error {
+			_, err := verifyGUIEntry(logCtx, drive, input.Directory, entry, input.AllowCurrent)
+			return err
+		})
 		if e != nil {
 			g.fail(w, errors.New(cl.redact.Text(e.Error())))
 			return
@@ -695,7 +698,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.lastResult = cl.folder
 		g.mu.Unlock()
 		g.event("指定文件已下载到测试目录")
-		respondJSON(w, 200, map[string]any{"ok": true, "download_key": key, "receipt": receipt})
+		respondJSON(w, 200, map[string]any{"ok": true, "download_key": key, "receipt": receipt, "version_verified": entry.ContentVersion != "" || entry.FID != ""})
 	case "/api/quit":
 		respondJSON(w, 200, map[string]any{"ok": true})
 		go func() { time.Sleep(200 * time.Millisecond); g.shutdown() }()

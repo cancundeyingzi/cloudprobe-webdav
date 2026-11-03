@@ -29,8 +29,10 @@ type openListInput struct {
 }
 type openListSaved struct {
 	openListInput
-	Identity string `json:"identity"`
-	Verified bool   `json:"verified"`
+	Identity         string `json:"identity"`
+	Verified         bool   `json:"verified"`
+	Revision         uint64 `json:"revision,omitempty"`
+	expectedRevision *uint64
 }
 type openListClient struct {
 	cfg    openListInput
@@ -416,6 +418,8 @@ func (g *guiApp) openListConfig(key string, in *openListInput, identity string) 
 		return nil, fmt.Errorf("读取 OpenList 凭据失败，保留原文件：%w", e)
 	}
 	previous := all[key]
+	revision := previous.Revision
+	previous.expectedRevision = &revision
 	if in == nil {
 		if !previous.Enabled {
 			return nil, nil
@@ -435,10 +439,18 @@ func (g *guiApp) openListConfig(key string, in *openListInput, identity string) 
 		copy.MetaPassword = previous.MetaPassword
 	}
 	verified := previous.Verified && previous.Identity == identity && previous.Address == copy.Address && previous.Root == copy.Root && previous.Token == copy.Token && previous.MetaPassword == copy.MetaPassword
-	return &openListSaved{openListInput: copy, Identity: identity, Verified: verified}, nil
+	return &openListSaved{openListInput: copy, Identity: identity, Verified: verified, Revision: revision, expectedRevision: &revision}, nil
 }
 func (g *guiApp) saveOpenList(key string, cfg openListSaved) error {
 	file := g.data + string(os.PathSeparator) + "openlist-config.bin"
+	if err := os.MkdirAll(g.data, 0700); err != nil {
+		return err
+	}
+	lease, err := lockCheckpointCatalog(context.Background(), file+".lock")
+	if err != nil {
+		return fmt.Errorf("OpenList 配置正在保存，请稍后重试：%w", err)
+	}
+	defer lease.Close()
 	all := map[string]openListSaved{}
 	if raw, e := os.ReadFile(file); e == nil {
 		plain, e := unprotectLocal(raw)
@@ -454,6 +466,10 @@ func (g *guiApp) saveOpenList(key string, cfg openListSaved) error {
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return fmt.Errorf("读取 OpenList 凭据失败，保留原文件：%w", e)
 	}
+	if cfg.expectedRevision != nil && all[key].Revision != *cfg.expectedRevision {
+		return errors.New("此 OpenList 挂载配置已被另一实例修改，请刷新后重试；未覆盖最新配置")
+	}
+	cfg.Revision = all[key].Revision + 1
 	all[key] = cfg
 	plain, e := json.Marshal(all)
 	if e != nil {

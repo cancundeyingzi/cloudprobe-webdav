@@ -109,8 +109,15 @@ func (c *uploadRecovery) wait(ctx context.Context) error {
 	}
 }
 func (c *uploadRecovery) observe(now time.Time) {
+	var event *runLogEntry
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		ctx := c.logCtx
+		c.mu.Unlock()
+		if event != nil {
+			logDAV(ctx, *event)
+		}
+	}()
 	bytes := c.sent.Load()
 	if c.active == 0 || c.active <= c.starved {
 		c.baseAt = time.Time{}
@@ -143,13 +150,13 @@ func (c *uploadRecovery) observe(now time.Time) {
 		if improved {
 			c.failures = 0
 			c.recovered++
-			logDAV(c.logCtx, runLogEntry{Operation: "总体上传低速恢复", Source: "全部上传任务", Result: "速度改善", BytesPerSecond: c.rate, Detail: fmt.Sprintf("暂停前 %.0f B/s；所有文件和线程合计；重新观察低速窗口", c.baseline)})
+			event = &runLogEntry{Operation: "总体上传低速恢复", Source: "全部上传任务", Result: "速度改善", BytesPerSecond: c.rate, Detail: fmt.Sprintf("暂停前 %.0f B/s；所有文件和线程合计；重新观察低速窗口", c.baseline)}
 			return
 		}
 		c.failures++
 		if c.failures >= c.options.UploadRecoveryTries {
 			c.limited = true
-			logDAV(c.logCtx, runLogEntry{Operation: "总体上传低速恢复", Source: "全部上传任务", Result: "按带宽受限处理", BytesPerSecond: c.rate, Detail: fmt.Sprintf("连续 %d 次无明显改善；本次服务运行停止主动暂停，传输及故障无限重试继续", c.failures)})
+			event = &runLogEntry{Operation: "总体上传低速恢复", Source: "全部上传任务", Result: "按带宽受限处理", BytesPerSecond: c.rate, Detail: fmt.Sprintf("连续 %d 次无明显改善；本次服务运行停止主动暂停，传输及故障无限重试继续", c.failures)}
 			return
 		}
 	}
@@ -159,7 +166,7 @@ func (c *uploadRecovery) observe(now time.Time) {
 		c.evaluating = true
 		c.pauseUntil = now.Add(c.pauseDuration)
 		c.baseAt = time.Time{}
-		logDAV(c.logCtx, runLogEntry{Operation: "总体上传低速恢复", Source: "全部上传任务", Result: "统一暂停", BytesPerSecond: c.rate, Attempt: c.attempts, Detail: fmt.Sprintf("合计速度低于 %.2f MB/s；全部上传正文暂停 %d ms 后自动恢复；检测窗口 %d 秒；无效 %d/%d", c.options.UploadLowSpeedMB, c.pauseDuration.Milliseconds(), c.options.UploadLowSeconds, c.failures, c.options.UploadRecoveryTries)})
+		event = &runLogEntry{Operation: "总体上传低速恢复", Source: "全部上传任务", Result: "统一暂停", BytesPerSecond: c.rate, Attempt: c.attempts, Detail: fmt.Sprintf("合计速度低于 %.2f MB/s；全部上传正文暂停 %d ms 后自动恢复；检测窗口 %d 秒；无效 %d/%d", c.options.UploadLowSpeedMB, c.pauseDuration.Milliseconds(), c.options.UploadLowSeconds, c.failures, c.options.UploadRecoveryTries)}
 	}
 }
 func (c *uploadRecovery) status() map[string]any {

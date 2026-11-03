@@ -236,7 +236,7 @@ func quarkSign(method, path, stamp string) string {
 func (q *quarkClient) call(ctx context.Context, route quarkRoute, method, path string, query url.Values, body any) (map[string]any, error) {
 	rejectedToken := q.snapshot().AccessToken
 	out, err := q.request(ctx, route, method, path, query, body, false)
-	if route == quarkOpen && quarkAuthError(err) && q.snapshot().RefreshToken != "" {
+	if route == quarkOpen && quarkAuthError(err) && (method == "GET" || method == "HEAD" || quarkMutationRejected(err)) && q.snapshot().RefreshToken != "" {
 		if re := q.rotate(ctx, rejectedToken); re == nil {
 			return q.request(ctx, route, method, path, query, body, false)
 		}

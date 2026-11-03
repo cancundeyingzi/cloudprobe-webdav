@@ -215,6 +215,7 @@ func TestReReviewSlowLogExportAllowsRotation(t *testing.T) {
 	l.maxFileBytes, l.maxTotalBytes, l.maxFiles = 1024, 4096, 4
 	for range 9 {
 		l.add(runLogEntry{Operation: "before-export", Detail: strings.Repeat("x", 150)})
+		flushTestLog(t, l)
 	}
 	var expected []byte
 	for _, path := range l.segments {
@@ -250,8 +251,10 @@ func TestReReviewSlowLogExportAllowsRotation(t *testing.T) {
 		defer close(written)
 		for range 50 {
 			l.add(runLogEntry{Operation: "during-export", Detail: strings.Repeat("y", 150)})
+			flushTestLog(t, l)
 		}
 		l.add(runLogEntry{Operation: "last-disk-record"})
+		flushTestLog(t, l)
 	}()
 	select {
 	case <-written:
@@ -329,6 +332,7 @@ func TestReReviewLogExportCancellationAndBudget(t *testing.T) {
 	l := newRuntimeLog(t.TempDir(), nil)
 	defer l.close()
 	l.add(runLogEntry{Operation: "export-source"})
+	flushTestLog(t, l)
 	g := &guiApp{runLog: l}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

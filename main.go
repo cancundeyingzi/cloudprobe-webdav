@@ -14,7 +14,7 @@ import (
 	"syscall"
 )
 
-const version = "1.12.7"
+const version = "1.12.8"
 
 type namesFlag []string
 
