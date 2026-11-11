@@ -97,7 +97,7 @@ func (s *davService) recordWriteResult(r *http.Request, state *davRequestState, 
 	if err != nil {
 		return
 	}
-	for _, m := range s.fs.mounts {
+	for _, m := range s.fs.mountSnapshot() {
 		if path != "/"+m.Alias && !strings.HasPrefix(path, "/"+m.Alias+"/") {
 			continue
 		}

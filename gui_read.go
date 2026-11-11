@@ -39,7 +39,10 @@ func (g *guiApp) guiReadDrive(key string, cl *Client) (davDrive, *transferRuntim
 		return drive, runtime, err
 	}
 	if account.Provider == "wopan" {
-		return newWopanDAVDrive(cl, account.credentials, account.Root, nil), newTransferRuntime(transferOptions{}), nil
+		return g.newWopanAccountDrive(cl, account, account.Root, nil), newTransferRuntime(transferOptions{}), nil
+	}
+	if valueString(account.credentials["mobile_web_token"]) != "" {
+		return g.mobileAccountDrive(account), newTransferRuntime(transferOptions{}), nil
 	}
 	return &mobileDAVDrive{originalDAVDrive: originalDAVDrive{client: cl}}, newTransferRuntime(transferOptions{}), nil
 }

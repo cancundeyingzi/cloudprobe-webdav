@@ -34,7 +34,7 @@ func (f *davFS) checkNativeWrite(ctx context.Context, name string) error {
 	// A failed native credential preflight already makes these writes unusable.
 	// Reject before receiving a body or publishing an empty resume checkpoint.
 	if native := nativeWopanDrive(p.mount.drive); native != nil {
-		if err := native.ready(); err != nil {
+		if err := native.refreshAccountWrite(ctx); err != nil {
 			return err
 		}
 	}

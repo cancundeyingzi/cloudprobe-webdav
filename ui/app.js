@@ -1,7 +1,7 @@
 const $=id=>document.getElementById(id);const storageKey='cloudprobe-ui-'+location.port;let nonce=document.querySelector('meta[name="cloudprobe-ui-session"]').content||location.hash.slice(1)||sessionStorage.getItem(storageKey)||'';if(nonce)sessionStorage.setItem(storageKey,nonce);if(location.hash)history.replaceState(null,'',location.pathname);
 let state={},qrLoaded=false,qrTried=false,qrLoading=false,polling=false,busy=false,stopped=false,lastPoll=0,report=null,selected=null,view='all',historyDirs=[],currentDir='',currentAccount='';
 const titles = {
-  login:['账号与登录','集中管理独立夸克账号、爆米花登录与备用授权。','连接与授权'],
+  login:['账号与登录','各云盘独立登录，同一账号的多种授权自动合并为备用渠道。','连接与授权'],
   webdav:['WebDAV 服务','连接第三方客户端，统一管理云盘挂载和访问权限。','服务与挂载'],
   transfers:['传输设置','按用途配置调度、云端连接、缓存与总体低速恢复。','调度与资源'],
   files:['文件浏览与验证','读取真实目录，查看文件条目并验证指定文件内容。','目录与内容'],
@@ -45,7 +45,7 @@ document.querySelectorAll('[data-log-tab]').forEach(button => {
     if (target) { event.preventDefault(); logTab(target); $('log-tab-' + target).focus(); }
   };
 });
-$('go-files').onclick = () => tab('files');
+$('go-files').onclick = () => {$('login-drawer').close();tab('files')};
 try { tab(sessionStorage.getItem('cloudprobe-page-' + location.port) || 'login'); } catch { tab('login'); }
 function paintConsoleStatus(s) {
 	const pending = Number(s.credential_save_pending || 0), warning = $('credential-save-warning');
@@ -53,7 +53,7 @@ function paintConsoleStatus(s) {
 	warning.textContent = pending ? '有 ' + pending + ' 个账号的新授权尚未保存。' + (s.credential_save_error || '正在重试保存。') : '';
   const d = s.webdav || {}, running = !!d.running;
   $('account-dot').classList.toggle('ready',!!(s.has_accounts || s.logged_in));
-  $('global-login').textContent = s.has_accounts || s.logged_in ? '云盘账号可用' : '账号未登录';
+  $('global-login').textContent = s.has_accounts || s.logged_in ? '已添加云盘账号' : '账号未登录';
   $('dav-dot').classList.toggle('ready',running);
   $('global-dav').textContent = running ? 'WebDAV 运行中' : 'WebDAV 未启动';
   const host = $('account-summary'); host.replaceChildren();
@@ -62,18 +62,29 @@ function paintConsoleStatus(s) {
     const name = document.createElement('strong'), provider = document.createElement('p'), badge = document.createElement('span');
     row.className = 'account-item'; icon.className = 'account-avatar'; icon.textContent = account.provider === 'quark' ? '夸' : account.provider === 'wopan' ? '联' : '移';
     info.className = 'account-info'; name.textContent = account.name;
-    provider.textContent = account.provider === 'quark' ? '夸克网盘 · 独立账号' : account.provider === 'wopan' ? '联通云盘 · 网易绑定' : '移动云盘 · 网易绑定';
+    provider.textContent = account.provider === 'quark' ? '夸克网盘 · 独立账号' : account.provider === 'wopan' ? '联通云盘' : '移动云盘';
     badge.className = 'tag' + (account.official_web_available ? ' yes' : '');
-    badge.textContent = account.provider === 'quark' ? (account.channels || []).join(' · ') : account.provider === 'wopan' ? account.official_web_available ? '官网备用授权已保存' : '可添加官网备用授权' : '已读取绑定凭据';
-    info.append(name,provider,badge); if(account.provider === 'quark') decorateQuarkAccount(info,account); row.append(icon,info); host.append(row);
+    badge.textContent = (account.channels || []).join(' · ') || '授权已保存';
+    info.append(name,provider,badge);
+    const load=(d.account_loads||{})[account.key],statusLine=document.createElement('p'),actions=document.createElement('div');
+    statusLine.className='account-load '+(running&&load?load.state:'');
+    statusLine.textContent=!running?'服务已停止':!load?'未挂载':load.state==='mounted'?'已挂载':load.state==='loading'?'正在加载…':'加载失败：'+load.error;
+    actions.className='account-actions';
+    if(running&&load&&load.state==='failed'){const retry=document.createElement('button');retry.className='small';retry.textContent='重试加载';retry.onclick=async()=>{retry.disabled=true;try{await api('webdav/retry',{account:account.key});await status()}catch(e){notice(e.message)}};actions.append(retry)}
+    const login=document.createElement('button');login.className='small';login.textContent=load&&load.state==='failed'?'重新登录':'补充授权';login.onclick=()=>openLogin(account.provider,account.key);actions.append(login);
+    info.append(statusLine,actions); if(account.provider === 'quark') decorateQuarkAccount(info,account); row.append(icon,info); host.append(row);
   }
   if (!(s.accounts || []).length) {
     const empty = document.createElement('div'); empty.className = 'empty';
-    empty.textContent = s.logged_in ? '尚未发现已绑定的云盘，可刷新账号列表。' : '扫码登录后，已绑定的移动、联通云盘会显示在这里。'; host.append(empty);
+    empty.textContent = s.logged_in ? '尚未发现已绑定的云盘，可刷新账号列表。' : '可直接登录移动、联通或夸克，也可通过网易读取绑定渠道。'; host.append(empty);const add=document.createElement('button');add.className='primary';add.textContent='添加第一个账号';add.onclick=()=>openLogin('mobile');empty.append(document.createElement('br'),add);
   }
   $('login-badge').classList.toggle('yes',!!s.logged_in);
+  $('entry-mobile-status').textContent=s.mobile_web_login&&s.mobile_web_login.running?'登录中…':'官网登录';
+  $('entry-wopan-status').textContent=s.wopan_web_login&&s.wopan_web_login.running?'登录中…':'官网登录';
+  $('entry-quark-status').textContent=s.quark&&s.quark.running?'登录中…':'扫码 / 手机号';
+  $('entry-netease-status').textContent=s.logged_in?'已登录 · 绑定账号授权':'绑定账号授权';
 }
-function notice(text,kind='error'){const n=$('notice');n.textContent=text;n.className='banner '+kind;n.classList.toggle('hidden',!text)}
+function notice(text,kind='error'){for(const id of ['notice','drawer-notice']){const n=$(id);n.textContent=text;n.className='banner '+kind;n.classList.toggle('hidden',!text)}}
 let engineFailureSignature = '', engineDiagnosticText = '';
 function paintEngineFailure(s) {
  const diagnostic = s.engine_diagnostic || (s.engine_error ? {title:'网易引擎不可用',reason:s.engine_error,steps:['关闭程序后重新启动；如果仍失败，复制诊断信息以进一步定位。']} : null);
@@ -109,12 +120,12 @@ $('engine-copy-diagnostic').onclick=async()=>{
  catch { $('engine-failure-details').open=true;$('engine-copy-status').textContent='复制失败，请在展开的详情中手动选择复制。'; }
 };
 async function api(path,data,method='POST'){const r=await fetch('/api/'+path,{method,headers:{'X-CloudProbe-UI':nonce,...(method==='POST'?{'Content-Type':'application/json'}:{})},...(method==='POST'?{body:JSON.stringify(data||{})}:{})});let d;try{d=await r.json()}catch{throw new Error(await r.text().catch(()=> '本地服务连接异常'))}if(!r.ok){const e=new Error(d.error||'请求失败');e.data=d;throw e}return d}
-function selectedAccountReady(){const a=(state.accounts||[]).find(a=>a.key===$('account').value);return !!a&&(a.provider==='quark'||state.engine_ready&&state.logged_in)}
+function selectedAccountReady(){const a=(state.accounts||[]).find(a=>a.key===$('account').value);return !!a}
 function controls(){const ready=selectedAccountReady();$('query-files').disabled=!ready||busy;$('refresh-accounts').disabled=(!state.logged_in&&!state.has_accounts)||busy;$('account').disabled=!(state.accounts||[]).length||busy;$('logout').disabled=!state.logged_in||!state.engine_ready||busy;$('refresh-qr').disabled=!state.engine_ready||state.logged_in||qrLoading;$('poll-login').disabled=!qrLoaded||state.logged_in||polling;$('fetch-file').disabled=!ready||busy||!browseSnapshot||!selected||selected.directory;$('export-results').disabled=!state.has_result||busy;$('back-dir').disabled=!historyDirs.length||busy;davControls();quarkControls()}
-function paintStatus(s){state=s;$('engine-dot').classList.toggle('ready',!!s.engine_ready);$('engine-label').textContent=s.engine_ready?'原版引擎就绪':'引擎启动中';$('footer-state').textContent=s.stage||'';$('version-label').textContent=s.version||'—';$('login-state').textContent=s.stage||'';$('login-badge').textContent=s.logged_in?'已登录':'未登录';$('login-qr').classList.toggle('hidden',!!s.logged_in);$('login-done').classList.toggle('hidden',!s.logged_in);$('logged-user').textContent=s.user||'';$('event-log').textContent=(s.events||[]).join('\n')||'等待原版引擎初始化…';paintDAV(s.webdav||{});paintWebLogin();paintTransfers(s.webdav||{});paintConsoleStatus(s);paintQuarkStatus(s);pollRunLog(s.run_log||{});
+function paintStatus(s){state=s;$('engine-dot').classList.toggle('ready',!!s.engine_ready);$('engine-label').textContent=s.engine_ready?'原版引擎就绪':'引擎启动中';$('footer-state').textContent=s.stage||'';$('version-label').textContent=s.version||'—';$('login-state').textContent=s.stage||'';$('login-badge').textContent=s.logged_in?'已登录':'未登录';$('login-qr').classList.toggle('hidden',!!s.logged_in);$('login-done').classList.toggle('hidden',!s.logged_in);$('logged-user').textContent=s.user||'';$('event-log').textContent=(s.events||[]).join('\n')||'等待原版引擎初始化…';paintDAV(s.webdav||{});paintWebLogin();paintMobileLogin();paintTransfers(s.webdav||{});paintConsoleStatus(s);paintQuarkStatus(s);pollRunLog(s.run_log||{});
  const a=$('account'),old=a.value,next=s.accounts||[];if(a.options.length!==next.length||Array.from(a.options).some((o,i)=>!next[i]||next[i].key!==o.value)){a.replaceChildren();if(!next.length){a.add(new Option(s.logged_in?'未发现已绑定的移动/联通云盘':'登录后选择',''))}else{next.forEach(x=>a.add(new Option(x.name,x.key)));if(next.some(x=>x.key===old))a.value=old;accountChanged()}}
  paintEngineFailure(s);
- controls();if(s.engine_ready&&!s.logged_in&&!qrTried&&!qrLoading)refreshQR();
+ controls();if($('login-drawer').open&&activeLogin==='netease'&&s.engine_ready&&!s.logged_in&&!qrTried&&!qrLoading)refreshQR();
 }
 async function status(){if(stopped)return;try{paintStatus(await api('status',null,'GET'))}catch(e){$('footer-state').textContent='本地服务已断开；重新启动工具后刷新页面。'}}
 async function refreshQR(){qrTried=true;qrLoading=true;notice('');$('qr-placeholder').classList.remove('hidden');$('qr-placeholder').textContent='正在获取真实登录二维码…';$('qr-image').classList.add('hidden');controls();try{const d=await api('qr');$('qr-image').src=d.image;$('qr-image').classList.remove('hidden');$('qr-placeholder').classList.add('hidden');qrLoaded=true;await status()}catch(e){notice(e.message);$('qr-placeholder').textContent='二维码获取失败，可点击刷新重试。'}finally{qrLoading=false;controls()}}
@@ -155,24 +166,54 @@ function paintDAVConfigError(d){$('dav-config-error').classList.toggle('hidden',
 async function recoverDAVConfig(reset){if(reset&&!confirm('将原 webdav.json 保留为恢复备份，并重新设置 WebDAV？账号资料不会删除。'))return;try{const result=await api('webdav/config/'+(reset?'reset':'reload'),{confirm:reset});davFormReady=false;davAccountKeys='';paintDAV(result.status);notice(result.backup?'原配置已保留为 '+result.backup+'，请重新设置 WebDAV。':'配置已重新读取。','success')}catch(e){notice(e.message);await status()}}
 $('dav-config-reload').onclick=()=>recoverDAVConfig(false);
 $('dav-config-reset').onclick=()=>recoverDAVConfig(true);
-function paintDAV(d){state.webdav=d;paintDAVConfigError(d);paintDAVWriteWarnings(d);if(!davFormReady){$('dav-listen').value=d.listen||'127.0.0.1';$('dav-port').value=d.port||50146;$('dav-user').value=d.username||'cloudprobe';$('dav-max').value=d.max_upload_mib||10240;$('dav-concurrency').value=d.upload_concurrency||4;$('dav-mode').value=d.upload_mode||'auto';davFormReady=true}
+function paintDAV(d){
+ if(d.generated_password&&!$('dav-pass').value){$('dav-pass').value=d.generated_password;$('dav-pass-hint').textContent='已自动生成 WebDAV 密码，可显示或复制到客户端。';}
+state.webdav=d;paintDAVConfigError(d);paintDAVWriteWarnings(d);if(!davFormReady){$('dav-listen').value=d.listen||'127.0.0.1';$('dav-port').value=d.port||50146;$('dav-user').value=d.username||'cloudprobe';$('dav-max').value=d.max_upload_mib||10240;$('dav-concurrency').value=d.upload_concurrency||4;$('dav-mode').value=d.upload_mode||'auto';davFormReady=true}
  $('dav-state').textContent=d.running?'运行中':'未启动';$('dav-state').style.color=d.running?'#21865a':'';$('dav-active').textContent=d.active||0;$('dav-count').textContent=(d.mounts||[]).length;
- const accounts=state.accounts||[],keys=accounts.map(a=>a.key).join('|');if(keys!==davAccountKeys){davAccountKeys=keys;davRows=[];const body=$('dav-mounts');body.replaceChildren();const counts={};accounts.forEach(a=>{const saved=(d.saved_mounts||[]).find(m=>m.account===a.key);counts[a.provider]=(counts[a.provider]||0)+1;const row=body.insertRow(),enabled=document.createElement('input'),alias=document.createElement('input'),root=document.createElement('input'),permission=document.createElement('select'),storage=document.createElement('select');enabled.type='checkbox';enabled.checked=!(d.saved_mounts||[]).length||!!saved;enabled.setAttribute('aria-label','启用 '+a.name);alias.value=saved?saved.alias:(a.provider==='quark'?'夸克网盘-':a.provider==='wopan'?'联通云盘-':'移动云盘-')+counts[a.provider];alias.setAttribute('aria-label','挂载文件夹名');root.value=saved?saved.root:a.root;root.setAttribute('aria-label','挂载根目录 ID');permission.add(new Option('读写','write'));permission.add(new Option('只读','read'));if(saved)permission.value=saved.writable?'write':'read';permission.setAttribute('aria-label','挂载权限');storage.add(new Option('跟随全局',''));storage.add(new Option('正文纯内存 · 保存续传状态','memory'));storage.add(new Option('内存优先','auto'));storage.add(new Option('磁盘兼容','disk'));storage.value=saved?(saved.upload_storage_mode||''):(a.provider==='quark'?'auto':'');storage.setAttribute('aria-label','挂载上传缓存 · '+a.name);row.insertCell().append(enabled);row.insertCell().textContent=a.name;row.insertCell().append(alias);row.insertCell().append(root);row.insertCell().append(permission);row.insertCell().append(storage);davRows.push({account:a.key,enabled,alias,root,permission,storage})});if(!accounts.length){const cell=body.insertRow().insertCell();cell.colSpan=6;cell.className='empty';cell.textContent='登录后显示可用的云盘账号。'}}
- const addresses=$('dav-addresses');addresses.replaceChildren();if(d.running){(d.urls||[]).forEach(u=>{const line=document.createElement('div'),text=document.createElement('span'),copy=document.createElement('button');text.textContent=u+' ';copy.textContent='复制地址';copy.className='small';copy.onclick=()=>copyDAV(u);line.append(text,copy);addresses.append(line)});const p=document.createElement('div');p.textContent='用户名：'+d.username+' · 密码在基础设置中管理。客户端填写 /dav/ 可看到挂载文件夹。';addresses.append(p)}else{addresses.textContent='服务已停止。填写设置并启动后，将显示连接地址。'}
+ const accounts=state.accounts||[],keys=accounts.map(a=>a.key).join('|')+JSON.stringify(d.saved_mounts||[]);if(keys!==davAccountKeys){davAccountKeys=keys;davRows=[];const body=$('dav-mounts');body.replaceChildren();const counts={};accounts.forEach(a=>{const saved=(d.saved_mounts||[]).find(m=>m.account===a.key);counts[a.provider]=(counts[a.provider]||0)+1;const row=body.insertRow(),enabled=document.createElement('input'),alias=document.createElement('input'),root=document.createElement('input'),permission=document.createElement('select'),storage=document.createElement('select');enabled.type='checkbox';enabled.checked=!!saved;enabled.setAttribute('aria-label','启用 '+a.name);alias.value=saved?saved.alias:(a.provider==='quark'?'夸克网盘-':a.provider==='wopan'?'联通云盘-':'移动云盘-')+counts[a.provider];alias.setAttribute('aria-label','挂载文件夹名');root.value=saved?saved.root:a.root;root.setAttribute('aria-label','挂载根目录 ID');permission.add(new Option('读写','write'));permission.add(new Option('只读','read'));if(saved)permission.value=saved.writable?'write':'read';permission.setAttribute('aria-label','挂载权限');storage.add(new Option('跟随全局',''));storage.add(new Option('正文纯内存 · 保存续传状态','memory'));storage.add(new Option('内存优先','auto'));storage.add(new Option('磁盘兼容','disk'));storage.value=saved?(saved.upload_storage_mode||''):(a.provider==='quark'?'auto':'');storage.setAttribute('aria-label','挂载上传缓存 · '+a.name);row.insertCell().append(enabled);row.insertCell().textContent=a.name;row.insertCell().append(alias);row.insertCell().append(root);row.insertCell().append(permission);row.insertCell().append(storage);davRows.push({account:a.key,enabled,alias,root,permission,storage})});if(!accounts.length){const cell=body.insertRow().insertCell();cell.colSpan=6;cell.className='empty';cell.textContent='登录后显示可用的云盘账号。'}}
+ const addresses=$('dav-addresses');addresses.replaceChildren();if(d.running){(d.urls||[]).forEach(u=>{const line=document.createElement('div'),text=document.createElement('span'),copy=document.createElement('button');text.textContent=u+' ';copy.textContent='复制地址';copy.className='small';copy.onclick=()=>copyDAV(u);line.append(text,copy);addresses.append(line)});const p=document.createElement('div');p.textContent='用户名：'+d.username+' · 密码在基础设置中管理。客户端填写 /dav/ 可看到挂载文件夹。';addresses.append(p)}else{addresses.textContent=d.last_error?'启动失败：'+d.last_error:'服务已停止。填写设置并启动后，将显示连接地址。'}
  $('dav-log').textContent=(d.activity||[]).slice(-60).reverse().map(x=>x.time+'  '+x.method+'  '+x.status+'  '+x.path+'  '+x.duration_ms+' ms  #'+(x.request_id||'')+(x.method==='PUT'?'\n  客户端接收 '+logBytes(x.received_bytes)+' · 云端发送 '+logBytes(x.sent_bytes)+' · 已确认 '+logBytes(x.confirmed_bytes):'')+(x.error?'\n  '+x.error:'')).join('\n')||'尚无 WebDAV 请求。';if(d.mounts&&d.mounts.length)$('dav-capabilities').textContent=d.mounts.map(m=>m.alias+'：'+m.write_status).join('；')+'。跨挂载复制/移动暂不支持。';davControls()}
-function davControls(){const running=!!(state.webdav&&state.webdav.running);$('dav-start').disabled=!!(state.webdav&&state.webdav.config_error)||busy||running||!!(state.wopan_web_login&&state.wopan_web_login.running)||!!(state.quark&&state.quark.running)||!state.has_accounts;$('dav-gen-pass').disabled=busy||running;$('dav-stop').disabled=busy||!running;for(const id of ['dav-listen','dav-port','dav-user','dav-pass','dav-max','dav-concurrency','dav-mode'])$(id).disabled=busy||running;for(const row of davRows)for(const key of ['enabled','alias','root','permission','storage'])row[key].disabled=busy||running;
- const reason=state.webdav&&state.webdav.config_error?'请先恢复损坏或无法读取的 WebDAV 配置。':running?'服务运行中，停止后可修改设置。':busy?'正在处理操作，请稍候。':state.wopan_web_login&&state.wopan_web_login.running?'正在进行官网备用登录，完成或取消后可启动服务。':state.quark&&state.quark.running?'请先完成或取消夸克登录。':!state.has_accounts?'请先在“账号与登录”添加可用云盘。':'设置就绪后启动服务，账号与传输配置会一并保存。';
+function davControls(){const running=!!(state.webdav&&state.webdav.running);$('dav-start').disabled=!!(state.webdav&&state.webdav.config_error)||busy||running;$('dav-gen-pass').disabled=busy||running;$('dav-stop').disabled=busy||!running;for(const id of ['dav-listen','dav-port','dav-user','dav-pass','dav-max','dav-concurrency','dav-mode'])$(id).disabled=busy||running;for(const row of davRows)for(const key of ['enabled','alias','root','permission','storage'])row[key].disabled=busy||running;
+ const reason=state.webdav&&state.webdav.config_error?'请先恢复损坏或无法读取的 WebDAV 配置。':running?'服务运行中，停止后可修改设置。':busy?'正在处理操作，请稍候。':!state.has_accounts?'没有网盘时也可启动，WebDAV 根目录将显示为空。':'设置就绪后启动服务，账号与传输配置会一并保存。';
  $('dav-control-reason').textContent=reason;$('dav-start').title=$('dav-start').disabled?reason:'';
  $('dav-settings-note').textContent=running?'服务运行中，基础设置与挂载只读；停止后可修改。':'设置随下次启动服务保存并生效。';
  $('dav-readonly-tag').classList.toggle('hidden',!running);transferControls()}
-function paintWebLogin(){const select=$('wopan-web-account'),accounts=(state.accounts||[]).filter(a=>a.provider==='wopan'),old=select.value;const keys=accounts.map(a=>a.key).join('|');if(select.dataset.keys!==keys){select.dataset.keys=keys;select.replaceChildren();accounts.forEach(a=>select.add(new Option(a.name,a.key)));if(accounts.some(a=>a.key===old))select.value=old;if(!accounts.length)select.add(new Option('尚无联通绑定账号',''))}const a=accounts.find(a=>a.key===select.value),s=state.wopan_web_login||{},running=!!(state.webdav&&state.webdav.running);$('wopan-web-badge').textContent=a&&a.official_web_available?'已保存官网备用授权':'尚未添加';$('wopan-web-badge').classList.toggle('yes',!!(a&&a.official_web_available));$('web-login-service-link').classList.toggle('hidden',!running);$('wopan-web-status').textContent=running?'WebDAV 正在运行。请前往“WebDAV 服务”停止服务，再更新官网备用授权。':s.running?s.stage+(s.error?'\n'+s.error:''):a&&a.official_web_available?'备用登录已保存在本机。启动 WebDAV 后，联通直连接口会使用这份授权。':s.error||s.stage||'点击后会打开本工具专用的联通官网窗口，完成登录后自动验证同一账号。';$('wopan-web-open').disabled=!a||busy||running||s.running;$('wopan-web-stop').disabled=!s.running;$('wopan-web-clear').disabled=!a||!a.official_web_available||busy||running;$('wopan-web-import').disabled=!a||busy||running;$('wopan-web-account').disabled=running||s.running}
+function paintWebLogin(){
+ const select=$('wopan-web-account'),accounts=(state.accounts||[]).filter(a=>a.provider==='wopan'),old=select.value;
+ const keys=accounts.map(a=>a.key).join('|');
+ if(select.dataset.keys!==keys){select.dataset.keys=keys;select.replaceChildren(new Option('自动识别账号 / 添加新账号',''));accounts.forEach(a=>select.add(new Option(a.name,a.key)));if(accounts.some(a=>a.key===old))select.value=old}
+ const a=accounts.find(a=>a.key===select.value),s=state.wopan_web_login||{};
+ $('wopan-web-badge').textContent=accounts.length?'已有账号':'未登录';$('wopan-web-badge').classList.toggle('yes',!!accounts.length);
+ $('web-login-service-link').classList.add('hidden');
+ $('wopan-web-status').textContent=(s.stage||'直接在联通官网完成登录，无需网易账号。同一账号自动合并授权。')+(s.error?'\n'+s.error:'');
+ $('wopan-web-open').disabled=busy||!!s.running;$('wopan-web-stop').disabled=!s.running;
+ $('wopan-web-clear').disabled=!a||!a.official_web_available||busy||!!(state.webdav&&state.webdav.running);
+ $('wopan-web-import').disabled=busy||!!s.running;$('wopan-web-account').disabled=!!s.running;
+}
+function paintMobileLogin(){const s=state.mobile_web_login||{};$('mobile-web-status').textContent=(s.stage||'直接在移动官网完成登录，无需网易账号。')+(s.error?'\n'+s.error:'');$('mobile-web-open').disabled=busy||!!s.running;$('mobile-web-stop').disabled=!s.running;$('mobile-web-import').disabled=busy||!!s.running}
+async function mobileLoginAction(action){try{const data=await api('mobile-login/'+action,{token:action==='import'?$('mobile-web-token').value:''});if(action==='import')$('mobile-web-token').value='';paintStatus(data)}catch(e){notice(e.message)}}
+$('mobile-web-open').onclick=()=>mobileLoginAction('start');$('mobile-web-stop').onclick=()=>mobileLoginAction('stop');$('mobile-web-import').onclick=()=>mobileLoginAction('import');
 $('wopan-web-account').onchange=paintWebLogin;
-async function webLoginAction(action){try{const data={account:$('wopan-web-account').value};if(action==='import')data.cookie=$('wopan-web-cookie').value;await api('webdav/wopan-login/'+action,data);if(action==='import')$('wopan-web-cookie').value='';await status();notice(action==='start'?'请在打开的官网窗口完成登录。':action==='clear'?'已移除官网备用登录。':action==='import'?'官网备用登录已验证保存。':'已取消登录。','success')}catch(e){notice(e.message)}}
+async function webLoginAction(action){try{const data={account:$('wopan-web-account').value};if(action==='import')data.cookie=$('wopan-web-cookie').value;await api('webdav/wopan-login/'+action,data);if(action==='import')$('wopan-web-cookie').value='';await status();notice(action==='start'?'请在打开的官网窗口完成登录。':action==='clear'?'已移除官网登录渠道。':action==='import'?'官网登录已验证保存。':'已取消登录。','success')}catch(e){notice(e.message)}}
 $('wopan-web-open').onclick=()=>webLoginAction('start');$('wopan-web-stop').onclick=()=>webLoginAction('stop');$('wopan-web-clear').onclick=()=>webLoginAction('clear');$('wopan-web-import').onclick=()=>webLoginAction('import');
 async function copyDAV(text){try{await navigator.clipboard.writeText(text);notice('已复制。','success')}catch{notice('复制失败，请手动选择并复制。')}}
 $('dav-gen-pass').onclick=()=>{const values=crypto.getRandomValues(new Uint8Array(16));$('dav-pass').value=Array.from(values,b=>b.toString(16).padStart(2,'0')).join('');$('dav-pass-hint').textContent='已生成新密码，点击“启动 WebDAV”后生效；请复制到第三方软件。'};
 $('dav-show').onclick=()=>{const input=$('dav-pass');input.type=input.type==='password'?'text':'password';$('dav-show').textContent=input.type==='password'?'显示密码':'隐藏密码'};
 $('dav-copy-pass').onclick=()=>{$('dav-pass').value?copyDAV($('dav-pass').value):notice('当前密码未在页面保留。如已设置，可停止服务后填写新密码。')};
-$('dav-start').onclick=async()=>{busy=true;controls();notice('正在验证挂载和写接口，首次启动可能需要数秒。','');try{const d=await api('webdav/start',{listen:$('dav-listen').value,port:Number($('dav-port').value),username:$('dav-user').value,password:$('dav-pass').value,max_upload_mib:Number($('dav-max').value),upload_concurrency:Number($('dav-concurrency').value),upload_mode:$('dav-mode').value,...transferPayload(),mounts:davRows.filter(r=>r.enabled.checked).map(r=>({account:r.account,alias:r.alias.value.trim(),root:r.root.value.trim(),writable:r.permission.value==='write',upload_storage_mode:r.storage.value,openlist:openListPayload(r.account)}))});if(d.generated_password){$('dav-pass').value=d.generated_password;$('dav-pass-hint').textContent='已自动生成密码，请复制到第三方软件。此密码只在本页保留，配置中保存校验值。'}paintDAV(d);notice('WebDAV 已启动，可以使用连接地址访问。','success');await status()}catch(e){notice(e.message)}finally{busy=false;controls()}};
+$('dav-start').onclick=async()=>{busy=true;controls();notice('正在启动 WebDAV 服务…','');try{const d=await api('webdav/start',{listen:$('dav-listen').value,port:Number($('dav-port').value),username:$('dav-user').value,password:$('dav-pass').value===((state.webdav||{}).generated_password||'')?'':$('dav-pass').value,max_upload_mib:Number($('dav-max').value),upload_concurrency:Number($('dav-concurrency').value),upload_mode:$('dav-mode').value,...transferPayload(),mounts:davRows.filter(r=>r.enabled.checked).map(r=>({account:r.account,alias:r.alias.value.trim(),root:r.root.value.trim(),writable:r.permission.value==='write',upload_storage_mode:r.storage.value,openlist:openListPayload(r.account)}))});if(d.generated_password){$('dav-pass').value=d.generated_password;$('dav-pass-hint').textContent='已自动生成密码，请复制到第三方软件。自动生成的密码已在本机保护保存。'}paintDAV(d);notice('WebDAV 已启动，可以使用连接地址访问。','success');await status()}catch(e){notice(e.message)}finally{busy=false;controls()}};
 $('dav-stop').onclick=async()=>{busy=true;controls();try{paintDAV(await api('webdav/stop'));notice('WebDAV 已停止。','success');await status()}catch(e){notice(e.message)}finally{busy=false;controls()}};
 setInterval(status,4000);setInterval(poll,2200);setInterval(()=>{if(qrLoaded&&!state.logged_in&&!state.engine_error){const remain=Math.max(0,(state.qr_expires||0)-Math.floor(Date.now()/1000));$('qr-expiry').textContent=remain?'二维码剩余约 '+remain+' 秒；请在手机上确认登录。':'二维码可能已到期，请刷新。'}},1000);status();
+
+let activeLogin='mobile';
+function openLogin(provider,account=''){
+ activeLogin=provider;$('drawer-notice').classList.add('hidden');const labels={mobile:'移动云盘',wopan:'联通云盘',quark:'夸克网盘',netease:'网易爆米花'};
+ document.querySelectorAll('[data-login-panel]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.loginPanel!==provider));
+ $('login-drawer-title').textContent=labels[provider]+' · 登录与授权';
+ if(provider==='wopan')$('wopan-web-account').value=account;
+ if(provider==='quark')$('quark-login-target').value=account;
+ if(!$('login-drawer').open)$('login-drawer').showModal();
+ if(provider==='netease'&&state.engine_ready&&!state.logged_in&&!qrLoaded&&!qrLoading)refreshQR();
+}
+document.querySelectorAll('[data-login]').forEach(button=>button.onclick=()=>openLogin(button.dataset.login));
+$('login-drawer-close').onclick=()=>$('login-drawer').close();
+$('login-drawer').addEventListener('click',event=>{if(event.target===$('login-drawer')&&event.clientX<$('login-drawer').getBoundingClientRect().left)$('login-drawer').close()});

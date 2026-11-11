@@ -294,7 +294,13 @@ func (m *quarkManager) commitCredential(ctx context.Context, c quarkCredentials,
 		return err
 	}
 	m.mu.Lock()
-	m.clients[key] = m.makeClient(c)
+	if existing := m.clients[key]; existing != nil {
+		existing.mu.Lock()
+		existing.credentials = c
+		existing.mu.Unlock()
+	} else {
+		m.clients[key] = m.makeClient(c)
+	}
 	if tagged && m.flow != nil {
 		m.flow.completed = true
 		m.flow.stage = "夸克登录成功，授权已保存"
@@ -415,8 +421,8 @@ func (g *guiApp) quarkAPI(w http.ResponseWriter, r *http.Request) {
 		g.op.Lock()
 		defer g.op.Unlock()
 	}
-	if action != "quota" && action != "cancel" && g.dav.Status()["running"] == true {
-		g.fail(w, errors.New("请先停止 WebDAV，再添加、更新或移除夸克授权"))
+	if action == "remove" && g.dav.Status()["running"] == true {
+		g.fail(w, errors.New("请先停止使用此账号的 WebDAV，再移除账号"))
 		return
 	}
 	var err error

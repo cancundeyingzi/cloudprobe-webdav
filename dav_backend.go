@@ -107,23 +107,26 @@ func (d *originalDAVDrive) URL(ctx context.Context, it davEntry) (raw string, er
 
 type wopanDAVDrive struct {
 	originalDAVDrive
-	w                 *wopan.WoClient
-	directMu          contextMutex
-	root              string
-	family            string
-	directErr         string
-	directCause       error
-	writeStateMu      sync.RWMutex
-	redactor          *Redactor
-	onRefresh         func(string, string) error
-	serverAccess      string
-	serverRefresh     string
-	usingWeb          bool
-	uploadConcurrency int
-	uploadMode        string
-	uploadSlots       chan struct{}
-	uploadPartMiB     int
-	uploadBudget      *fairLimiter
+	w                    *wopan.WoClient
+	directMu             contextMutex
+	root                 string
+	family               string
+	directErr            string
+	directCause          error
+	writeStateMu         sync.RWMutex
+	redactor             *Redactor
+	onRefresh            func(string, string) error
+	serverAccess         string
+	serverRefresh        string
+	usingWeb             bool
+	webAccess            string
+	accountCredentials   func() map[string]any
+	credentialNeedsProbe bool
+	uploadConcurrency    int
+	uploadMode           string
+	uploadSlots          chan struct{}
+	uploadPartMiB        int
+	uploadBudget         *fairLimiter
 }
 
 func newWopanDAVDrive(cl *Client, credentials map[string]any, root string, refresh func(string, string) error) *wopanDAVDrive {
@@ -139,10 +142,11 @@ func newWopanDAVDrive(cl *Client, credentials map[string]any, root string, refre
 	d.serverRefresh = valueString(credentials["wopan_server_refresh_token"])
 	cl.redact.Add(d.serverAccess)
 	cl.redact.Add(d.serverRefresh)
-	if web := valueString(credentials["wopan_web_token"]); web != "" {
+	if web := wopanWebToken(credentials); web != "" {
 		w.SetAccessToken(web)
 		w.SetRefreshToken("")
-		d.usingWeb = true
+		d.webAccess = web
+		d.setWebMode(true)
 		cl.redact.Add(web)
 	}
 	cl.redact.Add(valueString(credentials["refresh_token"]))
@@ -211,10 +215,12 @@ func (d *wopanDAVDrive) probe(ctx context.Context) error {
 		return e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
+	defer func() { d.credentialNeedsProbe = false }()
 	_, e := d.w.QueryAllFilesPersonal(d.root, 0, 100, 0, woContext(ctx))
-	if wopanAuthError(e) && d.usingWeb {
+	if wopanAuthError(e) && d.usingWeb && d.client.cfg.Wopan.AccessToken != "" {
 		logFallback(ctx, "联通网页授权", "联通绑定授权直连", e)
-		d.usingWeb = false
+		d.setWebMode(false)
 		d.w.SetAccessToken(d.client.cfg.Wopan.AccessToken)
 		d.w.SetRefreshToken(d.serverRefresh)
 		_, e = d.w.QueryAllFilesPersonal(d.root, 0, 100, 0, woContext(ctx))
@@ -255,6 +261,15 @@ func wopanAuthError(e error) bool {
 	return strings.Contains(s, "1001") || strings.Contains(s, "9999") || strings.Contains(s, "无效登录") || strings.Contains(s, "授权/会话失效") || strings.Contains(s, "token expired")
 }
 func (d *wopanDAVDrive) List(ctx context.Context, dir string) ([]davEntry, error) {
+	if d.client.bridge == nil && d.client.cfg.Transport == "bridge" {
+		if err := d.directMu.LockContext(ctx); err != nil {
+			return nil, err
+		}
+		defer d.directMu.Unlock()
+		d.syncAccountCredential()
+		return d.directList(ctx, dir)
+	}
+
 	var entries []davEntry
 	var primary error
 	cooled := d.health.cool("list-proxy")
@@ -278,6 +293,7 @@ func (d *wopanDAVDrive) List(ctx context.Context, dir string) ([]davEntry, error
 		return nil, e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	if wopanAuthError(primary) {
 		if e := d.refreshNative(ctx); e == nil {
 			if entries, e = d.originalDAVDrive.List(ctx, dir); e == nil {
@@ -302,7 +318,14 @@ func (d *wopanDAVDrive) List(ctx context.Context, dir string) ([]davEntry, error
 	}
 	return entries, nil
 }
-func (d *wopanDAVDrive) directList(ctx context.Context, dir string) (entries []davEntry, err error) {
+func (d *wopanDAVDrive) directList(ctx context.Context, dir string) ([]davEntry, error) {
+	entries, err := d.directListOnce(ctx, dir)
+	if err != nil && ctx.Err() == nil && d.otherAuthorization() {
+		return d.directListOnce(ctx, dir)
+	}
+	return entries, err
+}
+func (d *wopanDAVDrive) directListOnce(ctx context.Context, dir string) (entries []davEntry, err error) {
 	started := time.Now()
 	defer func() { logList(ctx, d.source(), "QueryAllFiles", started, entries, err) }()
 	entries = []davEntry{}
@@ -400,6 +423,15 @@ func parseDAVTime(value string) time.Time {
 	return time.Time{}
 }
 func (d *wopanDAVDrive) URL(ctx context.Context, it davEntry) (string, error) {
+	if d.client.bridge == nil && d.client.cfg.Transport == "bridge" {
+		target, err := d.readDirectURL(ctx, it, true)
+		if err == nil {
+			return target.URL, nil
+		}
+		target, err = d.readDirectURL(ctx, it, false)
+		return target.URL, err
+	}
+
 	u, primary := d.originalDAVDrive.URL(ctx, it)
 	if primary == nil && validDAVURL(u) == nil {
 		return u, nil
@@ -412,6 +444,7 @@ func (d *wopanDAVDrive) URL(ctx context.Context, it davEntry) (string, error) {
 		return "", e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	if wopanAuthError(primary) {
 		if e := d.refreshNative(ctx); e == nil {
 			u, e = d.originalDAVDrive.URL(ctx, it)
@@ -472,12 +505,16 @@ func (d *wopanDAVDrive) Mkdir(ctx context.Context, parent, name string) (entry d
 		return davEntry{}, e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	finish := logPhase(ctx, "新建目录", d.source(), name+"；CreateDirectory")
 	defer func() { finish(err) }()
 	if e := d.ready(); e != nil {
 		return davEntry{}, &davNotExecuted{e}
 	}
 	r, e := d.w.CreateDirectory(wopan.SpaceTypePersonal, parent, name, d.family, woContext(ctx))
+	if e != nil && confirmedMutationRejection(e) && d.otherAuthorization() {
+		r, e = d.w.CreateDirectory(wopan.SpaceTypePersonal, parent, name, d.family, woContext(ctx))
+	}
 	if e != nil {
 		return davEntry{}, mutationFailure(e, "CreateDirectory", false)
 	}
@@ -588,6 +625,7 @@ func (d *wopanDAVDrive) Remove(ctx context.Context, it davEntry) (err error) {
 		return e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	finish := logPhase(ctx, "删除条目", d.source(), it.Name+"；DeleteFile")
 	defer func() { finish(err) }()
 	if e := d.ready(); e != nil {
@@ -607,6 +645,7 @@ func (d *wopanDAVDrive) Move(ctx context.Context, it davEntry, parent, name stri
 		return e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	finish := logPhase(ctx, "重命名或移动", d.source(), it.Name+" → "+name+"；RenameFileOrDirectory / MoveFile")
 	defer func() { finish(err) }()
 	if e := d.ready(); e != nil {

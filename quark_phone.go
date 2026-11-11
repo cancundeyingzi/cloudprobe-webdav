@@ -1,18 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +35,7 @@ type quarkBrowserRPC struct {
 	stopWatch  chan struct{}
 	watchDone  chan struct{}
 	closeOnce  sync.Once
+	onEvent    func(string, json.RawMessage)
 }
 
 func newQuarkBrowserRPC(ctx context.Context, connection *websocket.Conn) *quarkBrowserRPC {
@@ -79,6 +74,8 @@ func (c *quarkBrowserRPC) call(ctx context.Context, method string, params any, s
 	for {
 		var reply struct {
 			ID     int64           `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
 			Result json.RawMessage `json:"result"`
 			Error  *struct {
 				Code int `json:"code"`
@@ -91,6 +88,9 @@ func (c *quarkBrowserRPC) call(ctx context.Context, method string, params any, s
 			return nil, errors.New("官网登录窗口已关闭或未响应，请重新打开")
 		}
 		if reply.ID != id {
+			if c.onEvent != nil && reply.Method != "" {
+				c.onEvent(reply.Method, reply.Params)
+			}
 			continue
 		}
 		if reply.Error != nil {
@@ -109,140 +109,15 @@ func (c *quarkBrowserRPC) Close() {
 	})
 }
 func openQuarkPhoneWindow(ctx context.Context, data string) (quarkPhoneWindow, error) {
-	browser, err := findLoginBrowser()
-	if err != nil {
-		return nil, err
-	}
-	// Never attach to a personal browser profile or a previous login attempt.
-	profile := filepath.Join(data, "official-quark-browser", "phone-"+randomKey()[:16])
-	if err = os.MkdirAll(profile, 0700); err != nil {
-		return nil, err
-	}
-	command := exec.Command(browser, "--user-data-dir="+profile, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--remote-allow-origins=http://127.0.0.1", "--no-first-run", "--no-default-browser-check", "--disable-sync", "--new-window", "https://pan.quark.cn/")
-	// This visible window is the phone login explicitly requested by the user.
-	if err = command.Start(); err != nil {
-		return nil, errors.New("无法打开夸克官网窗口，请检查 Edge / Chrome 是否可用")
-	}
-	exited := make(chan error, 1)
-	go func() { exited <- command.Wait(); close(exited) }()
-	readyCtx, readyCancel := context.WithTimeout(ctx, 20*time.Second)
-	defer readyCancel()
-	for {
-		if err = readyCtx.Err(); err != nil {
-			_ = command.Process.Kill()
-			return nil, errors.New("官网登录窗口未能就绪，请重新打开")
-		}
-		select {
-		case <-exited:
-			return nil, errors.New("官网登录窗口已提前关闭，请重新打开")
-		default:
-		}
-		raw, readErr := os.ReadFile(filepath.Join(profile, "DevToolsActivePort"))
-		if readErr == nil {
-			scanner := bufio.NewScanner(strings.NewReader(string(raw)))
-			if scanner.Scan() {
-				port, parseErr := strconv.Atoi(strings.TrimSpace(scanner.Text()))
-				if parseErr == nil && port > 0 && port <= 65535 && scanner.Scan() {
-					path := strings.TrimSpace(scanner.Text())
-					if strings.HasPrefix(path, "/devtools/browser/") && !strings.ContainsAny(path, "?#\r\n") {
-						cfg, configErr := websocket.NewConfig(fmt.Sprintf("ws://127.0.0.1:%d%s", port, path), "http://127.0.0.1")
-						if configErr == nil {
-							cfg.Dialer = &net.Dialer{Timeout: 2 * time.Second}
-							connection, dialErr := websocket.DialConfig(cfg)
-							if dialErr == nil {
-								return &quarkPhoneBrowser{rpc: newQuarkBrowserRPC(ctx, connection), command: command, exited: exited}, nil
-							}
-						}
-					}
-				}
-			}
-		}
-		if err = davWait(readyCtx, 100*time.Millisecond); err != nil {
-			_ = command.Process.Kill()
-			return nil, err
-		}
-	}
+	return openOfficialBrowser(ctx, data, "quark", "https://pan.quark.cn/")
 }
 
-const quarkChooseMobileScript = `(() => {
-  const frames=Array.from(document.querySelectorAll('iframe'));
-  if(frames.some(frame=>{try{const u=new URL(frame.src);return u.origin==='https://uop.quark.cn'&&u.searchParams.get('custom_login_type')==='mobile'}catch{return false}}))return true;
-  const choices=Array.from(document.querySelectorAll('button,a,span,div')).filter(node=>node.textContent.trim()==='手机登录'&&node.getClientRects().length);
-  choices.sort((a,b)=>a.childElementCount-b.childElementCount);
-  if(choices[0])choices[0].click();
-  return false;
-})()`
-
 func (b *quarkPhoneBrowser) Poll(ctx context.Context) (quarkPhoneSnapshot, error) {
-	var snapshot quarkPhoneSnapshot
-	select {
-	case <-b.exited:
-		return snapshot, errors.New("官网登录窗口已关闭，请重新打开")
-	default:
-	}
-	raw, err := b.rpc.call(ctx, "Target.getTargets", nil, "")
+	cookies, err := b.cookies(ctx)
 	if err != nil {
-		return snapshot, err
+		return quarkPhoneSnapshot{}, err
 	}
-	var targets struct {
-		Targets []struct {
-			ID   string `json:"targetId"`
-			Type string `json:"type"`
-			URL  string `json:"url"`
-		} `json:"targetInfos"`
-	}
-	if err = json.Unmarshal(raw, &targets); err != nil {
-		return snapshot, errors.New("官网登录窗口返回了未知页面状态")
-	}
-	target := ""
-	for _, page := range targets.Targets {
-		u, e := url.Parse(page.URL)
-		if e == nil && page.Type == "page" && u.Scheme == "https" && u.Host == "pan.quark.cn" {
-			target = page.ID
-			break
-		}
-	}
-	if target == "" {
-		return snapshot, nil
-	}
-	if b.target != target || b.session == "" {
-		result, e := b.rpc.call(ctx, "Target.attachToTarget", map[string]any{"targetId": target, "flatten": true}, "")
-		if e != nil {
-			return snapshot, e
-		}
-		var attachment struct {
-			Session string `json:"sessionId"`
-		}
-		if json.Unmarshal(result, &attachment) != nil || attachment.Session == "" {
-			return snapshot, errors.New("无法连接专用官网登录页")
-		}
-		b.target = target
-		b.session = attachment.Session
-	}
-	result, err := b.rpc.call(ctx, "Runtime.evaluate", map[string]any{"expression": quarkChooseMobileScript, "returnByValue": true}, b.session)
-	if err != nil {
-		return snapshot, err
-	}
-	var evaluation struct {
-		Result struct {
-			Value bool `json:"value"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(result, &evaluation) == nil {
-		snapshot.MobileReady = evaluation.Result.Value
-	}
-	cookies, err := b.rpc.call(ctx, "Network.getCookies", map[string]any{"urls": []string{"https://pan.quark.cn/desktop/account/userinfo", "https://pan.quark.cn/account/info", "https://drive-pc.quark.cn/1/clouddrive/", "https://drive.quark.cn/1/clouddrive/"}}, b.session)
-	if err != nil {
-		return snapshot, err
-	}
-	var data struct {
-		Cookies []quarkBrowserCookie `json:"cookies"`
-	}
-	if json.Unmarshal(cookies, &data) != nil {
-		return snapshot, errors.New("官网登录窗口未返回有效会话状态")
-	}
-	snapshot.Cookies = quarkPhoneCookies(data.Cookies, time.Now())
-	return snapshot, nil
+	return quarkPhoneSnapshot{Cookies: quarkPhoneCookies(cookies, time.Now())}, nil
 }
 
 type quarkBrowserCookie struct {

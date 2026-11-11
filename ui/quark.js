@@ -13,13 +13,13 @@ function paintQuarkStatus(s){
   quarkControls();
 }
 function quarkControls(){
-  const running=!!(state.webdav&&state.webdav.running),login=!!(state.quark&&state.quark.running),locked=running||quarkBusy||busy;
+  const running=!!(state.webdav&&state.webdav.running),login=!!(state.quark&&state.quark.running),locked=quarkBusy||busy;
   for(const id of ['quark-login-start','quark-login-method','quark-login-target','quark-cookie-import','quark-cookie'])$(id).disabled=locked||login;
   $('quark-login-cancel').disabled=!login||!!(state.quark&&state.quark.completed);
   const phone=$('quark-login-method').value==='phone';
   $('quark-login-start').textContent=phone?'打开手机号登录窗口':'生成登录二维码';
   $('quark-qr-placeholder').textContent=phone?'官网手机号登录\n手机号、短信验证码和官网验证在新窗口中完成。':'选择登录方式后生成二维码。请在对应手机 App 中扫码确认。';
-  $('quark-service-hint').textContent=running?'WebDAV 正在运行，停止服务后可添加或更新夸克授权。':'夸克账号可独立使用。授权后在 WebDAV 服务页勾选挂载，再启动服务。';
+  $('quark-service-hint').textContent='每种方式都能独立登录，同一账号自动合并为备用渠道；已有传输继续运行。';
 }
 async function quarkAction(action){
   quarkBusy=true;quarkControls();try{

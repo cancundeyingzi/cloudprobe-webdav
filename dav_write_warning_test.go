@@ -153,17 +153,19 @@ func TestDAVStartsWithReadableCloudWhenWriteProbeFails(t *testing.T) {
 	}
 }
 
-func TestDAVStillRejectsUnreadableCloudAndCanceledStart(t *testing.T) {
+func TestDAVSkipsUnreadableCloudAndRejectsCanceledStart(t *testing.T) {
 	d, in, _, _ := warningStartFixture(t, "unreadable")
-	if _, err := d.Start(context.Background(), in); err == nil {
-		t.Fatal("unreadable mount accepted")
+	if _, err := d.Start(context.Background(), in); err != nil {
+		t.Fatal(err)
 	}
-	if d.Status()["running"] != false {
-		t.Fatal("failed start left service running")
+	if d.Status()["running"] != true || len(d.mounts) != 0 {
+		t.Fatal("failed cloud should leave empty running service")
 	}
-	if _, err := os.Stat(filepath.Join(d.app.data, "webdav.json")); !os.IsNotExist(err) {
-		t.Fatal("failed start persisted configuration", err)
+	if len(d.config.Mounts) != 1 || d.loads["a"].State != "failed" {
+		t.Fatal("failed mount configuration or error lost")
 	}
+	wantDAV(t, fmt.Sprintf("http://127.0.0.1:%d", in.Port), "PROPFIND", "/", "", 207, map[string]string{"Depth": "1"})
+	d.Stop()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := d.Start(ctx, in); !errors.Is(err, context.Canceled) {

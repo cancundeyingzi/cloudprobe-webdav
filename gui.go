@@ -64,6 +64,8 @@ type guiApp struct {
 	extraSecrets          []string
 	runLog                *runtimeLog
 	webLogin              *wopanWebLogin
+	mobileLogin           *cloudWebLogin
+	cloudAccountError     string
 	dav                   *davManager
 	mu                    sync.Mutex
 	op                    sync.Mutex
@@ -144,7 +146,6 @@ func (g *guiApp) loadAccounts(ctx context.Context) error {
 		return e
 	}
 	accounts := map[string]guiAccount{}
-	var order []string
 	for _, p := range []struct{ field, provider, label string }{{"m139_credentials", "mobile", "移动云盘"}, {"wopan_credentials", "wopan", "联通云盘"}} {
 		for i, raw := range list(data[p.field]) {
 			c := object(raw)
@@ -158,6 +159,10 @@ func (g *guiApp) loadAccounts(ctx context.Context) error {
 			if name == "" {
 				name = fmt.Sprintf("账号 %d", i+1)
 			}
+			if p.provider == "mobile" {
+				c["mobile_app_id"] = g.identity.AppID
+				c["mobile_app_secret"] = g.identity.AppSecret
+			}
 			root := defaultDirectory(p.provider)
 			for _, key := range []string{"root_directory_id", "root_id", "directory_id"} {
 				if v := valueString(c[key]); v != "" {
@@ -167,19 +172,24 @@ func (g *guiApp) loadAccounts(ctx context.Context) error {
 			}
 			key := randomKey()
 			accounts[key] = guiAccount{Key: key, Provider: p.provider, Name: p.label + " · " + maskAccount(name), Root: root, credentials: c}
-			order = append(order, key)
+
 		}
 	}
 	g.mu.Lock()
 	g.applyDAVCredentialsLocked(accounts)
-	for _, key := range g.accountOrder {
-		if a, ok := g.accounts[key]; ok && a.Provider == "quark" {
-			accounts[key] = a
-			order = append(order, key)
-		}
+	merged := make(map[string]guiAccount, len(g.accounts)+len(accounts))
+	for key, a := range g.accounts {
+		merged[key] = cloneGUIAccount(a)
 	}
-	g.accounts = accounts
-	g.accountOrder = order
+	for _, a := range accounts {
+		mergeCloudAccount(merged, a)
+	}
+	if err := g.writeCloudAccountsLocked(merged); err != nil {
+		g.mu.Unlock()
+		return err
+	}
+	g.accounts = merged
+	g.rebuildAccountOrderLocked()
 	g.mu.Unlock()
 	g.event(fmt.Sprintf("已读取 %d 个已绑定的移动/联通云盘账号", len(accounts)))
 	return nil
@@ -233,7 +243,7 @@ func (g *guiApp) publicStatus() map[string]any {
 		engineErr = g.bridge.exitError()
 	}
 	paths := g.enginePaths
-	out := map[string]any{"version": version, "engine_ready": g.bridge.Alive(), "stage": g.stage, "engine_error": "", "logged_in": g.logged, "user": g.user, "accounts": accounts, "has_accounts": len(accounts) > 0, "events": append([]string(nil), g.events...), "qr_expires": g.qrExpires.Unix(), "poll_after_seconds": g.pollAfter, "has_result": g.lastResult != ""}
+	out := map[string]any{"version": version, "engine_ready": g.bridge.Alive(), "stage": g.stage, "engine_error": "", "logged_in": g.logged, "user": g.user, "accounts": accounts, "has_accounts": len(accounts) > 0, "cloud_account_error": g.cloudAccountError, "events": append([]string(nil), g.events...), "qr_expires": g.qrExpires.Unix(), "poll_after_seconds": g.pollAfter, "has_result": g.lastResult != ""}
 	out["credential_save_pending"] = len(g.pendingDAVCredentials)
 	out["credential_save_error"] = g.credentialSaveError
 	out["secret_storage_encrypted"] = localCredentialsEncrypted
@@ -252,6 +262,9 @@ func (g *guiApp) publicStatus() map[string]any {
 	}
 	if g.webLogin != nil {
 		out["wopan_web_login"] = g.webLogin.Status()
+	}
+	if g.mobileLogin != nil {
+		out["mobile_web_login"] = g.mobileLogin.Status()
 	}
 	if g.runLog != nil {
 		out["run_log"] = g.runLog.status()
@@ -329,6 +342,7 @@ func (g *guiApp) accountClient(key string) (*Client, error) {
 	a = cloneGUIAccount(a)
 	b := g.bridge
 	identity := g.identity
+	logged := g.logged
 	g.mu.Unlock()
 	if ok && a.Provider == "quark" {
 		folder, err := runFolder(filepath.Join(g.data, "results"))
@@ -339,32 +353,15 @@ func (g *guiApp) accountClient(key string) (*Client, error) {
 		c.Provider = "quark"
 		return &Client{cfg: c, folder: folder, redact: newRedactor(Config{})}, nil
 	}
-	if !ok || b == nil {
-		return nil, errors.New("请选择已登录账号绑定的云盘")
-	}
-	c := defaultConfig(a.Provider)
-	c.Transport = "bridge"
-	c.BaseURL = "https://api.filmly.netease.com"
-	c.TimeoutSeconds = 40
-	c.IncludeDirectories = true
-	c.Mobile = identity
-	c.Mobile.AccessToken = valueString(a.credentials["token"])
-	c.Mobile.DeviceID = valueString(a.credentials["m139_device_id"])
-	c.Mobile.ChannelID = "10010"
-	c.Wopan.AccessToken = valueString(a.credentials["token"])
-	if a.Provider == "mobile" && (identity.AppID == "" || identity.AppSecret == "") {
-		return nil, errors.New("移动云盘应用身份尚未从原版组件读取")
+	if !ok {
+		return nil, errors.New("请选择已登录的云盘账号")
 	}
 	folder, e := runFolder(filepath.Join(g.data, "results"))
 	if e != nil {
 		return nil, e
 	}
-	client, e := newClient(c, folder)
-	if e != nil {
-		return nil, e
-	}
-	client.bridge = b
-	return client, nil
+	return g.cloudAccountClient(a, folder, identity, b, logged)
+
 }
 func respondJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -448,6 +445,10 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.runLogAPI(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/mobile-login/") {
+		g.mobileLoginAPI(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/quark/") {
 		g.quarkAPI(w, r)
 		return
@@ -527,20 +528,6 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, 200, g.publicStatus())
 	case "/api/logout":
-		g.webLogin.Stop()
-		if g.dav != nil {
-			g.dav.mu.Lock()
-			bound := false
-			for _, mount := range g.dav.mounts {
-				if mount.Provider != "quark" {
-					bound = true
-				}
-			}
-			g.dav.mu.Unlock()
-			if bound {
-				g.dav.Stop()
-			}
-		}
 		if _, e := g.call(r.Context(), "POST", "/v2/account/logout", map[string]any{}); e != nil {
 			g.fail(w, e)
 			return
@@ -549,17 +536,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.logged = false
 		g.user = ""
 		g.qrToken = ""
-		remaining := map[string]guiAccount{}
-		var order []string
-		for _, key := range g.accountOrder {
-			if a, ok := g.accounts[key]; ok && a.Provider == "quark" {
-				remaining[key] = a
-				order = append(order, key)
-			}
-		}
-		g.accounts = remaining
-		g.accountOrder = order
-		g.stage = "已退出本次测试会话"
+		g.stage = "已退出网易渠道，云盘独立授权仍可使用"
 		g.mu.Unlock()
 		g.event("已退出登录")
 		respondJSON(w, 200, g.publicStatus())
@@ -585,8 +562,8 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var report Report
 		var nativeEntries []davEntry
 		snapshotID := ""
-		if account.Provider == "quark" {
-			report = newReport("quark", "live-native", input.Directory)
+		if account.Provider == "quark" || account.WebBound || cl.bridge == nil {
+			report = newReport(account.Provider, "live-native", input.Directory)
 			drive, _, driveErr := g.guiReadDrive(input.Account, cl)
 			e = driveErr
 			if e == nil {
@@ -598,11 +575,11 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				report.Complete = true
 				report.Pages = 1
-				report.StopReason = "原生夸克驱动已按上游分页规则读取完成；分页及通道见运行记录"
+				report.StopReason = "云盘驱动已按上游分页规则读取完成；分页及通道见运行记录"
 				applyExpected(&report, names)
 			} else {
 				report.Error = g.redactDAV(e.Error())
-				report.StopReason = "原生夸克目录查询失败，不能视为空目录"
+				report.StopReason = "云盘目录查询失败，不能视为空目录"
 			}
 		} else {
 			report, e = cl.List(logCtx, input.Directory, "live-original-sdk", names)
@@ -779,10 +756,14 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	app.enginePaths = enginePaths{Executable: exe, SDK: *sdk, Bridge: *bridgePath, Data: *data}
 	app.runLog = newRuntimeLog(*data, app.redactDAV)
 	defer app.runLog.close()
+	app.restoreCloudAccounts()
 	app.quark = newQuarkManager(app)
 	defer app.quark.Stop()
 	app.dav = newDAVManager(app)
+	app.dav.AutoStart(ctx)
 	app.webLogin = &wopanWebLogin{app: app, stage: "未开始"}
+	app.mobileLogin = &cloudWebLogin{app: app, provider: "mobile"}
+	defer app.mobileLogin.Stop()
 	defer app.dav.Stop()
 	defer app.webLogin.Stop()
 	server := &http.Server{Handler: app, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}

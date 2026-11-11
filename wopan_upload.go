@@ -52,6 +52,8 @@ func uploadConcurrency(n int) int {
 	return 4
 }
 func (d *wopanDAVDrive) source() string {
+	d.writeStateMu.RLock()
+	defer d.writeStateMu.RUnlock()
 	if d.usingWeb {
 		return "联通网页授权"
 	}
@@ -62,6 +64,7 @@ func (d *wopanDAVDrive) prepareUpload(ctx context.Context, parent, name string, 
 		return nil, err
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	if err := d.ready(); err != nil {
 		return nil, err
 	}
@@ -100,8 +103,16 @@ func (d *wopanDAVDrive) prepareUpload(ctx context.Context, parent, name string, 
 			return "", "", err
 		}
 		defer d.directMu.Unlock()
+		d.syncAccountCredential()
 		if d.usingWeb {
-			return "", "", errors.New("官网授权暂不可用，任务保留并低频重试；更新官网登录需要先停止服务")
+			current, _ := d.w.GetToken()
+			if current != access {
+				encrypted, err := d.w.EncryptParam(wopan.ChannelWoHome, info)
+				return current, encrypted, err
+			}
+			if !d.otherAuthorization() {
+				return "", "", errors.New("官网授权已失效，请重新官网登录；任务保留，更新授权后自动重试")
+			}
 		}
 		if err := d.refreshNative(ctx); err != nil {
 			return "", "", err

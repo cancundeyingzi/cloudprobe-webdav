@@ -36,6 +36,7 @@ type davCache struct {
 	until   time.Time
 }
 type davFS struct {
+	mountMu      sync.RWMutex
 	mounts       []*davMount
 	spool        string
 	maxUpload    int64
@@ -186,7 +187,7 @@ func (f *davFS) lookup(ctx context.Context, name string) (davNode, error) {
 	}
 	parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
 	var m *davMount
-	for _, candidate := range f.mounts {
+	for _, candidate := range f.mountSnapshot() {
 		if candidate.Alias == parts[0] {
 			m = candidate
 			break
@@ -578,7 +579,7 @@ func (d *davFile) Readdir(count int) ([]os.FileInfo, error) {
 	}
 	var entries []davEntry
 	if d.node.mount == nil {
-		for _, m := range d.fs.mounts {
+		for _, m := range d.fs.mountSnapshot() {
 			entries = append(entries, davEntry{Item: Item{ID: m.Root, Name: m.Alias, Directory: true}})
 		}
 	} else {
@@ -972,10 +973,16 @@ func (f *davFS) memoryUploadAt(name string) bool {
 		return false
 	}
 	alias := strings.SplitN(strings.TrimPrefix(clean, "/"), "/", 2)[0]
-	for _, m := range f.mounts {
+	for _, m := range f.mountSnapshot() {
 		if m.Alias == alias {
 			return f.uploadStorage(m) == "memory"
 		}
 	}
 	return false
+}
+
+func (f *davFS) mountSnapshot() []*davMount {
+	f.mountMu.RLock()
+	defer f.mountMu.RUnlock()
+	return append([]*davMount{}, f.mounts...)
 }

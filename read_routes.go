@@ -72,7 +72,7 @@ func (d *wopanDAVDrive) ReadRoutes(ctx context.Context, it davEntry) []readRoute
 	if it.FID != "" {
 		version = "wopan-fid:" + it.FID
 	}
-	return []readRoute{
+	routes := []readRoute{
 		{Name: "网易代理", Version: version, Resolve: func(c context.Context) (readTarget, error) {
 			u, e := d.originalDAVDrive.URL(c, it)
 			return readTarget{URL: u}, e
@@ -80,12 +80,18 @@ func (d *wopanDAVDrive) ReadRoutes(ctx context.Context, it davEntry) []readRoute
 		{Name: "联通直连 V2", Version: version, Resolve: func(c context.Context) (readTarget, error) { return d.readDirectURL(c, it, true) }},
 		{Name: "联通直连 V1", Version: version, Resolve: func(c context.Context) (readTarget, error) { return d.readDirectURL(c, it, false) }},
 	}
+	if d.client.bridge == nil && d.client.cfg.Transport == "bridge" {
+		return routes[1:]
+	}
+	return routes
+
 }
 func (d *wopanDAVDrive) readDirectURL(ctx context.Context, it davEntry, v2 bool) (target readTarget, err error) {
 	if e := d.directMu.LockContext(ctx); e != nil {
 		return target, e
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	started := time.Now()
 	endpoint := "GetDownloadUrl"
 	if v2 {
@@ -120,7 +126,13 @@ func (d *wopanDAVDrive) readDirectURL(ctx context.Context, it davEntry, v2 bool)
 				}
 			}
 		}
-		if attempt == 0 && wopanAuthError(err) {
+		if attempt == 0 && err != nil {
+			if d.otherAuthorization() {
+				continue
+			}
+			if !wopanAuthError(err) {
+				break
+			}
 			if e := d.refreshNative(ctx); e == nil {
 				continue
 			}

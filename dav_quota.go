@@ -60,23 +60,24 @@ func (f *davFS) quotaMounts(name string) ([]*davMount, error) {
 	if err != nil {
 		return nil, err
 	}
+	snapshot := f.mountSnapshot()
 	if clean != "/" {
 		alias := strings.SplitN(strings.TrimPrefix(clean, "/"), "/", 2)[0]
-		for _, m := range f.mounts {
+		for _, m := range snapshot {
 			if m.Alias == alias && quotaDriveSupported(m.drive) {
 				return []*davMount{m}, nil
 			}
 		}
 		return nil, errors.ErrUnsupported
 	}
-	if len(f.mounts) == 0 {
+	if len(snapshot) == 0 {
 		return nil, errors.ErrUnsupported
 	}
 	seen := map[string]bool{}
 	var mounts []*davMount
-	for _, m := range f.mounts {
+	for _, m := range snapshot {
 		key, known := quotaAccountKey(m)
-		if !quotaDriveSupported(m.drive) || !known && len(f.mounts) > 1 {
+		if !quotaDriveSupported(m.drive) || !known && len(snapshot) > 1 {
 			return nil, errors.ErrUnsupported
 		}
 		if !seen[key] {

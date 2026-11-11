@@ -9,9 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -160,13 +158,10 @@ func TestOfficialLoginCaptureIgnoresUnrelatedEvents(t *testing.T) {
 				return
 			}
 			websocket.JSON.Send(conn, map[string]any{"method": "unrelated.event"})
-			websocket.JSON.Send(conn, map[string]any{"id": request["id"], "result": map[string]any{"cookies": []map[string]string{{"name": "WoCloud-Web-Token", "domain": "pan.wo.cn", "value": "test%2Btoken"}}}})
+			websocket.JSON.Send(conn, map[string]any{"id": request["id"], "result": map[string]any{"cookies": []map[string]string{{"name": "WoCloud-Web-Token", "domain": "pan.wo.cn", "value": "%22test%2Btoken%22"}}}})
 		}
 	}})
 	defer server.Close()
-	u, _ := url.Parse(server.URL)
-	profile := t.TempDir()
-	os.WriteFile(filepath.Join(profile, "DevToolsActivePort"), []byte(u.Port()+"\n/devtools/browser/test\n"), 0600)
 	accepted := false
 	l := &wopanWebLogin{app: &guiApp{}, validate: func(ctx context.Context, a guiAccount, token string) error {
 		if token != "test+token" {
@@ -177,12 +172,15 @@ func TestOfficialLoginCaptureIgnoresUnrelatedEvents(t *testing.T) {
 	}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	done := make(chan struct{})
-	go l.capture(ctx, cancel, guiAccount{}, profile, done)
-	select {
-	case <-done:
-	case <-ctx.Done():
-		t.Fatal("login capture did not complete")
+
+	conn, err := websocket.Dial("ws"+strings.TrimPrefix(server.URL, "http"), "", "http://127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	browser := &quarkPhoneBrowser{rpc: newQuarkBrowserRPC(ctx, conn)}
+	defer browser.rpc.Close()
+	if err = l.captureBrowser(ctx, browser, "wopan"); err != nil {
+		t.Fatal(err)
 	}
 	if !accepted {
 		t.Fatal("matching login result was lost behind an unrelated event")

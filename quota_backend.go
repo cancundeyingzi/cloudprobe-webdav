@@ -57,6 +57,7 @@ func (d *wopanDAVDrive) Quota(ctx context.Context) (q davQuota, err error) {
 		return q, err
 	}
 	defer d.directMu.Unlock()
+	d.syncAccountCredential()
 	attempt := func(w *wopan.WoClient, source string) (davQuota, error) {
 		finish := logPhase(ctx, "读取联通账号容量", source, "QueryCloudUsageInfo")
 		q, e := requestWopanQuota(ctx, w)
@@ -67,7 +68,7 @@ func (d *wopanDAVDrive) Quota(ctx context.Context) (q davQuota, err error) {
 	if err == nil || ctx.Err() != nil {
 		return q, err
 	}
-	if d.usingWeb {
+	if d.usingWeb && d.client.cfg.Wopan.AccessToken != "" {
 		// A separate client preserves the selected upload authorization. Read-only
 		// queries can safely try the bound token after the website route fails.
 		logFallback(ctx, "联通网页容量接口", "联通绑定授权容量接口", err)

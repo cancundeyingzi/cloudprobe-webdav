@@ -5,6 +5,7 @@ import (
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,8 @@ type davMountInput struct {
 	Writable          bool           `json:"writable"`
 }
 type davStartInput struct {
+	background bool
+	restore    bool
 	transferOptions
 	Listen            string          `json:"listen"`
 	Port              int             `json:"port"`
@@ -53,6 +56,8 @@ type davSavedMount struct {
 	Writable          bool   `json:"writable"`
 }
 type davSavedConfig struct {
+	GeneratedPassword string   `json:"generated_password,omitempty"`
+	KnownAccounts     []string `json:"known_accounts,omitempty"`
 	transferOptions
 	Listen            string          `json:"listen"`
 	Port              int             `json:"port"`
@@ -78,6 +83,15 @@ type davActivity struct {
 	Error          string `json:"error,omitempty"`
 }
 type davManager struct {
+	jobs map[string]davLoadState
+	// Tests can isolate slow and failing providers while exercising the real listener and loader lifecycle.
+	mountLoader       func(context.Context, davMountInput, guiAccount) (*davMount, error)
+	mountInputs       map[string]davMountInput
+	fs                *davFS
+	serviceContext    context.Context
+	generatedPassword string
+	loads             map[string]davLoadState
+	attempted         map[string]guiAccount
 	// Test transports may replace provider HTTP/bridge requests without bypassing Start.
 	wopanClientSetup func(*wopanDAVDrive)
 	controlMu        sync.RWMutex
@@ -101,6 +115,9 @@ func newDAVManager(g *guiApp) *davManager {
 	return d
 }
 func davIdentity(a guiAccount) string {
+	if stable := valueString(a.credentials["account_identity"]); stable != "" {
+		return stable
+	}
 	id := valueString(a.credentials["user_id"])
 	if id == "" {
 		id = valueString(a.credentials["username"])
@@ -139,7 +156,7 @@ func (d *davManager) Status() map[string]any {
 		}
 		d.app.mu.Unlock()
 	}
-	return map[string]any{"running": d.server != nil, "listen": d.config.Listen, "port": d.config.Port, "username": d.config.Username, "has_password": d.config.PasswordHash != "", "max_upload_mib": d.config.MaxUploadMiB, "upload_concurrency": uploadConcurrency(d.config.UploadConcurrency), "upload_mode": uploadMode(d.config.UploadMode), "transfer_settings": d.config.transferOptions.defaults(), "transfer_queues": d.transfers.status(), "urls": append([]string{}, d.urls...), "mounts": mounts, "saved_mounts": saved, "activity": append([]davActivity{}, d.activity...), "active": d.active, "last_error": d.lastError, "config_error": d.configError}
+	return map[string]any{"generated_password": d.generatedPassword, "account_loads": cloneLoadStates(d.loads), "running": d.server != nil, "listen": d.config.Listen, "port": d.config.Port, "username": d.config.Username, "has_password": d.config.PasswordHash != "", "max_upload_mib": d.config.MaxUploadMiB, "upload_concurrency": uploadConcurrency(d.config.UploadConcurrency), "upload_mode": uploadMode(d.config.UploadMode), "transfer_settings": d.config.transferOptions.defaults(), "transfer_queues": d.transfers.status(), "urls": append([]string{}, d.urls...), "mounts": mounts, "saved_mounts": saved, "activity": append([]davActivity{}, d.activity...), "active": d.active, "last_error": d.lastError, "config_error": d.configError}
 }
 func (d *davManager) Stop() {
 	if d == nil {
@@ -165,6 +182,9 @@ func (d *davManager) Stop() {
 func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]any, error) {
 	d.controlMu.Lock()
 	defer d.controlMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	previous := d.config
 	running := d.server != nil
@@ -217,7 +237,7 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	if in.UploadMode != "" && in.UploadMode != "auto" && in.UploadMode != "http1" && in.UploadMode != "http2" {
 		return nil, errors.New("上传传输模式请选择 HTTP/1.1 独立连接或 HTTP/2 共享连接对照")
 	}
-	cfg := davSavedConfig{Listen: in.Listen, Port: in.Port, Username: in.Username, MaxUploadMiB: in.MaxUploadMiB, UploadConcurrency: uploadConcurrency(in.UploadConcurrency), UploadMode: uploadMode(in.UploadMode), PasswordHash: previous.PasswordHash, Salt: previous.Salt}
+	cfg := davSavedConfig{Listen: in.Listen, Port: in.Port, Username: in.Username, MaxUploadMiB: in.MaxUploadMiB, UploadConcurrency: uploadConcurrency(in.UploadConcurrency), UploadMode: uploadMode(in.UploadMode), PasswordHash: previous.PasswordHash, Salt: previous.Salt, GeneratedPassword: previous.GeneratedPassword}
 	cfg.transferOptions = in.transferOptions.defaults()
 	if err := cfg.transferOptions.validate(); err != nil {
 		return nil, err
@@ -239,42 +259,53 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 		h, _ := pbkdf2.Key(sha256.New, in.Password, salt, 100000, 32)
 		cfg.Salt = hex.EncodeToString(salt)
 		cfg.PasswordHash = hex.EncodeToString(h)
-	}
-	if len(in.Mounts) == 0 {
-		return nil, errors.New("请至少选择一个云盘挂载")
+		cfg.GeneratedPassword = ""
+		if generated != "" {
+			protected, err := protectLocal([]byte(generated))
+			if err != nil {
+				return nil, err
+			}
+			cfg.GeneratedPassword = base64.StdEncoding.EncodeToString(protected)
+		}
 	}
 	g := d.app
-	if g.quark != nil && g.quark.Status()["running"] == true {
-		return nil, errors.New("请先完成或取消夸克登录，再启动 WebDAV")
-	}
-	if g.webLogin != nil && g.webLogin.Status()["running"] == true {
-		return nil, errors.New("请先完成或取消官网备用登录，再启动 WebDAV")
-	}
 	g.mu.Lock()
-	logged := g.logged
-	resourceErr := validateDAVMountResources(in.Mounts, g.accounts)
-	g.mu.Unlock()
-	if resourceErr != nil {
-		return nil, resourceErr
+	accounts := make(map[string]guiAccount, len(g.accounts))
+	for k, a := range g.accounts {
+		accounts[k] = cloneGUIAccount(a)
 	}
-	if !logged && !g.quark.loggedClients() {
-		return nil, errors.New("请先登录爆米花并读取绑定云盘，或添加独立夸克账号")
+	g.mu.Unlock()
+	cfg.KnownAccounts = append([]string{}, previous.KnownAccounts...)
+	if !in.restore || previous.KnownAccounts == nil && len(previous.Mounts) > 0 {
+		for _, a := range accounts {
+			cfg.KnownAccounts = appendUnique(cfg.KnownAccounts, davIdentity(a))
+		}
+	}
+	if in.restore {
+		cfg.Mounts = append([]davSavedMount{}, previous.Mounts...)
+	}
+	if !in.restore {
+		for _, saved := range previous.Mounts {
+			present := false
+			for _, a := range accounts {
+				if davIdentity(a) == saved.Identity {
+					present = true
+					break
+				}
+			}
+			if !present {
+				cfg.Mounts = append(cfg.Mounts, saved)
+			}
+		}
 	}
 	var mounts []*davMount
+	loads := map[string]davLoadState{}
 	aliases := map[string]bool{}
-	for _, sel := range in.Mounts {
-		g.mu.Lock()
-		a, ok := g.accounts[sel.Account]
-		a = cloneGUIAccount(a)
-		g.mu.Unlock()
-		if !ok {
-			return nil, errors.New("所选账号已变化，请刷新账号后重新选择")
-		}
-		if davIdentity(a) == "" {
-			return nil, errors.New("账号响应缺少稳定身份标识，无法安全恢复挂载和凭据；请重新读取绑定账号")
-		}
-		if sel.UploadStorageMode != "" && sel.UploadStorageMode != "memory" && sel.UploadStorageMode != "disk" && sel.UploadStorageMode != "auto" {
-			return nil, errors.New("挂载上传缓存方式请选择跟随全局、严格纯内存、内存优先或磁盘兼容")
+	for i := range in.Mounts {
+		sel := &in.Mounts[i]
+		a, ok := accounts[sel.Account]
+		if !ok || davIdentity(a) == "" {
+			return nil, errors.New("所选账号缺少稳定身份，请刷新账号列表")
 		}
 		if e := safeFilename(sel.Alias); e != nil || aliases[sel.Alias] {
 			return nil, errors.New("挂载名必须是唯一的普通文件夹名称")
@@ -289,117 +320,32 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 		if strings.ContainsAny(sel.Root, "\r\n\x00") {
 			return nil, errors.New("根目录 ID 无效")
 		}
-		cl, e := g.accountClient(sel.Account)
-		if e != nil {
-			return nil, e
+		if sel.UploadStorageMode != "" && sel.UploadStorageMode != "memory" && sel.UploadStorageMode != "disk" && sel.UploadStorageMode != "auto" {
+			return nil, errors.New("挂载上传缓存方式无效")
 		}
-		// WebDAV logs contain operation summaries, not raw directory responses.
-		cl.folder = ""
-		m := &davMount{UploadStorageMode: sel.UploadStorageMode, Alias: sel.Alias, Root: sel.Root, Provider: a.Provider, Writable: sel.Writable, Identity: davIdentity(a), WriteStatus: "只读挂载", health: &routeHealth{}}
-		backupKey := m.Identity + ":" + m.Alias
-		backupConfig, backupErr := g.openListConfig(backupKey, sel.OpenList, m.Identity+"\x00"+m.Root)
-		if backupErr != nil {
-			return nil, errors.New("读取 OpenList 备用配置失败：" + g.redactDAV(backupErr.Error()))
-		}
-		mountCtx := scopedDAV(newRunTrace(ctx, g.runLog, "挂载验证", "/"+m.Alias), m, "/"+m.Alias)
-		if a.Provider == "quark" {
-			drive, err := g.quarkDrive(sel.Account, transfers, cfg.UploadConcurrency, cfg.UploadMode)
+	}
+	if err := validateDAVMountResources(in.Mounts, accounts); err != nil {
+		return nil, err
+	}
+	for _, sel := range in.Mounts {
+		a := accounts[sel.Account]
+		saved := savedMountInput(sel, a)
+		if !in.background {
+			m, resolved, err := d.prepareMount(ctx, sel, a, cfg, transfers)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if err != nil {
-				return nil, err
-			}
-			m.drive = drive
-			if m.Writable {
-				m.WriteStatus = "夸克原生读写；网页上传需磁盘兼容模式，开放平台按实际能力验证"
-			}
-		} else if a.Provider == "wopan" {
-			drive := newWopanDAVDrive(cl, a.credentials, sel.Root, func(access, refresh string) error { return g.saveDAVCredential(a, access, refresh) })
-			drive.uploadConcurrency, drive.uploadPartMiB, drive.uploadBudget = cfg.UploadConcurrency, cfg.UploadPartMiB, transfers.connections
-			drive.uploadMode = cfg.UploadMode
-			if d.wopanClientSetup != nil {
-				d.wopanClientSetup(drive)
-			}
-			m.drive = drive
-			if m.Writable {
-				probeCtx, cancel := context.WithTimeout(mountCtx, 35*time.Second)
-				e = drive.probe(probeCtx)
-				cancel()
-				if e != nil {
-					if ctx.Err() != nil {
-						return nil, ctx.Err()
-					}
-					m.warnWrite("/"+m.Alias, "", e, cl.redact.Text)
-					logDAV(mountCtx, runLogEntry{Operation: "写入通道检查", Source: "联通原生接口", Result: "警告", Error: cl.redact.Text(e.Error()), Detail: "写入检查失败不阻止 WebDAV 启动，继续验证目录读取。"})
-					m.WriteStatus = "写入通道未通过验证；读取能力单独检查"
-				} else {
-					m.WriteStatus = "写入通道已初始化；实际权限由每次云端操作核验"
-				}
-			}
-		} else {
-			m.drive = &mobileDAVDrive{originalDAVDrive: originalDAVDrive{client: cl}, onRefresh: func(access, refresh string) error { return g.saveDAVCredential(a, access, refresh) }, budget: transfers.connections, partMiB: cfg.UploadPartMiB}
-			if m.Writable {
-				m.WriteStatus = "开放接口写入受应用目录及后缀限制；尚需此账号实测"
-			}
-		}
-		// Fail before opening a port when the requested mount root cannot be listed.
-		probeCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
-		_, e = m.drive.List(probeCtx, m.Root)
-		cancel()
-		primaryReadable := e == nil
-		if e != nil {
-			if backupConfig == nil || !backupConfig.Verified {
-				return nil, fmt.Errorf("挂载 %s 的目录验证失败：%s", m.Alias, cl.redact.Text(e.Error()))
-			}
-		}
-		savedMount := davSavedMount{UploadStorageMode: m.UploadStorageMode, Identity: m.Identity, Alias: m.Alias, Root: m.Root, Writable: m.Writable}
-		if backupConfig != nil {
-			g.mu.Lock()
-			g.extraSecrets = append(g.extraSecrets, backupConfig.Token, backupConfig.MetaPassword)
-			g.mu.Unlock()
-			backup, e := newOpenListClient(backupConfig.openListInput)
-			if e != nil {
-				return nil, e
-			}
-			backup.budget = transfers.connections
-			backupConfig.Address, backupConfig.Root = backup.cfg.Address, backup.cfg.Root
-			u, _ := url.Parse(backup.cfg.Address)
-			if backup.cfg.Address == "http://"+g.host || u.Host == net.JoinHostPort("127.0.0.1", strconv.Itoa(in.Port)) || u.Host == net.JoinHostPort("localhost", strconv.Itoa(in.Port)) {
-				return nil, errors.New("OpenList 地址不能指向本工具管理界面")
-			}
-			backupUnavailable := false
-			if !backupConfig.Verified {
-				if e = verifyOpenList(mountCtx, m.drive, m.Root, backup, g.data); e != nil {
-					if !primaryReadable || !cloudWriteDenied(e) {
-						return nil, errors.New(g.redactDAV(e.Error()))
-					}
-					backupUnavailable = true
-					m.warnWrite("/"+m.Alias, "", fmt.Errorf("OpenList 映射验证需要云端写入，当前被拒绝；本次使用已核验的内置读取通道，未启用 OpenList 备用：%w", e), g.redactDAV)
-				} else {
-					backupConfig.Verified = true
-				}
-			}
-			if e = g.saveOpenList(backupKey, *backupConfig); e != nil {
-				return nil, e
-			}
-			if !backupUnavailable {
-				m.drive = &backupDAVDrive{primary: m.drive, backup: backup, root: m.Root, paths: map[string]string{m.Root: ""}, entries: map[string]davEntry{}}
-				checkCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
-				_, checkErr := m.drive.List(checkCtx, m.Root)
-				cancel()
-				if checkErr != nil {
-					return nil, errors.New(g.redactDAV(checkErr.Error()))
-				}
-				m.WriteStatus += "；OpenList 仅作目录和下载备用，写入使用原生接口"
+				loads[sel.Account] = davLoadState{State: "failed", Error: g.redactDAV(err.Error())}
 			} else {
-				m.WriteStatus += "；OpenList 映射未核验，本次仅使用内置读取通道"
-			}
-			savedMount.OpenListEnabled, savedMount.OpenListAddress, savedMount.OpenListRoot = true, backup.cfg.Address, backup.cfg.Root
-		} else if sel.OpenList != nil && !sel.OpenList.Enabled {
-			if e = g.saveOpenList(backupKey, openListSaved{Identity: m.Identity}); e != nil {
-				return nil, e
+				mounts = append(mounts, m)
+				saved = resolved
+				loads[sel.Account] = davLoadState{State: "mounted"}
 			}
 		}
-		mounts = append(mounts, m)
-		cfg.Mounts = append(cfg.Mounts, savedMount)
+		if !in.restore {
+			cfg.Mounts = append(cfg.Mounts, saved)
+		}
 	}
 	listener, e := net.Listen("tcp", net.JoinHostPort(in.Listen, strconv.Itoa(in.Port)))
 	if e != nil {
@@ -424,6 +370,26 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	}
 	d.mu.Lock()
 	d.config = cfg
+	d.fs = fs
+	d.serviceContext = serviceCtx
+	d.mountInputs = map[string]davMountInput{}
+	for _, sel := range in.Mounts {
+		d.mountInputs[sel.Alias] = sel
+	}
+	d.loads = loads
+	d.jobs = map[string]davLoadState{}
+	d.attempted = map[string]guiAccount{}
+	if !in.background {
+		for _, sel := range in.Mounts {
+			d.attempted[sel.Account] = accounts[sel.Account]
+		}
+	}
+	d.generatedPassword = ""
+	if raw, err := base64.StdEncoding.DecodeString(cfg.GeneratedPassword); err == nil && len(raw) > 0 {
+		if plain, err := unprotectLocal(raw); err == nil {
+			d.generatedPassword = string(plain)
+		}
+	}
 	d.transfers = transfers
 	d.mounts = mounts
 	d.server = server
@@ -439,6 +405,9 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 			d.mu.Unlock()
 		}
 	}()
+	if in.background {
+		go d.watchMounts(serviceCtx)
+	}
 	g.event(fmt.Sprintf("WebDAV 已启动，挂载 %d 个云盘", len(mounts)))
 	out := d.Status()
 	if generated != "" {
@@ -530,7 +499,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		runtime = s.manager.app.runLog
 	}
 	logCtx := newRunTrace(r.Context(), runtime, r.Method, strings.TrimPrefix(r.URL.Path, "/dav"))
-	for _, m := range s.fs.mounts {
+	for _, m := range s.fs.mountSnapshot() {
 		if r.URL.Path == "/dav/"+m.Alias || strings.HasPrefix(r.URL.Path, "/dav/"+m.Alias+"/") {
 			logCtx = scopedDAV(logCtx, m, "")
 			break
@@ -680,7 +649,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		parts := strings.Split(strings.Trim(target, "/"), "/")
 		writable := false
-		for _, m := range s.fs.mounts {
+		for _, m := range s.fs.mountSnapshot() {
 			if m.Alias == parts[0] {
 				writable = m.Writable
 			}
@@ -729,7 +698,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					http.Error(rw, "纯内存上传需要客户端提供文件总长度 Content-Length", http.StatusLengthRequired)
 					return
 				}
-				for _, m := range s.fs.mounts {
+				for _, m := range s.fs.mountSnapshot() {
 					if m.Alias == parts[0] && !streamDriveAvailable(m.drive) {
 						http.Error(rw, "此挂载不支持纯内存上传，请明确选择磁盘兼容模式", http.StatusNotImplemented)
 						return
@@ -905,6 +874,21 @@ func (g *guiApp) davAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", 405)
 		return
 	}
+	if r.URL.Path == "/api/webdav/retry" {
+		var input struct {
+			Account string `json:"account"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil {
+			g.fail(w, err)
+			return
+		}
+		if err := g.dav.retryMount(input.Account); err != nil {
+			g.fail(w, err)
+			return
+		}
+		respondJSON(w, 200, g.dav.Status())
+		return
+	}
 	if r.URL.Path == "/api/webdav/stop" {
 		g.dav.Stop()
 		g.event("WebDAV 已停止")
@@ -948,6 +932,7 @@ func (g *guiApp) davAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	g.op.Lock()
 	defer g.op.Unlock()
+	in.background = true
 	out, e := g.dav.Start(r.Context(), in)
 	if e != nil {
 		g.fail(w, errors.New(g.redactDAV(e.Error())))
@@ -1028,7 +1013,7 @@ func (g *guiApp) applyDAVCredentialsLocked(accounts map[string]guiAccount) {
 			continue
 		}
 		c, ok := all[identity]
-		if ok && c.WebToken != "" {
+		if ok && c.WebToken != "" && valueString(a.credentials["wopan_web_managed"]) != "1" {
 			a.credentials["wopan_web_token"] = c.WebToken
 			a.WebBound = true
 			accounts[k] = a
@@ -1065,4 +1050,124 @@ func (g *guiApp) saveDAVWebCredential(a guiAccount, token string) error {
 		}
 	}
 	return nil
+}
+
+func (d *davManager) prepareMount(ctx context.Context, sel davMountInput, a guiAccount, cfg davSavedConfig, transfers *transferRuntime) (*davMount, davSavedMount, error) {
+	g := d.app
+	cl, e := g.accountClient(sel.Account)
+	if e != nil {
+		return nil, davSavedMount{}, e
+	}
+	// WebDAV logs contain operation summaries, not raw directory responses.
+	cl.folder = ""
+	m := &davMount{UploadStorageMode: sel.UploadStorageMode, Alias: sel.Alias, Root: sel.Root, Provider: a.Provider, Writable: sel.Writable, Identity: davIdentity(a), WriteStatus: "只读挂载", health: &routeHealth{}}
+	backupKey := m.Identity + ":" + m.Alias
+	backupConfig, backupErr := g.openListConfig(backupKey, sel.OpenList, m.Identity+"\x00"+m.Root)
+	if backupErr != nil {
+		return nil, davSavedMount{}, errors.New("读取 OpenList 备用配置失败：" + g.redactDAV(backupErr.Error()))
+	}
+	mountCtx := scopedDAV(newRunTrace(ctx, g.runLog, "挂载验证", "/"+m.Alias), m, "/"+m.Alias)
+	if a.Provider == "quark" {
+		drive, err := g.quarkDrive(sel.Account, transfers, cfg.UploadConcurrency, cfg.UploadMode)
+		if err != nil {
+			return nil, davSavedMount{}, err
+		}
+		m.drive = drive
+		if m.Writable {
+			m.WriteStatus = "夸克原生读写；网页上传需磁盘兼容模式，开放平台按实际能力验证"
+		}
+	} else if a.Provider == "wopan" {
+		drive := g.newWopanAccountDrive(cl, a, sel.Root, func(access, refresh string) error { return g.saveDAVCredential(a, access, refresh) })
+		drive.uploadConcurrency, drive.uploadPartMiB, drive.uploadBudget = cfg.UploadConcurrency, cfg.UploadPartMiB, transfers.connections
+		drive.uploadMode = cfg.UploadMode
+		if d.wopanClientSetup != nil {
+			d.wopanClientSetup(drive)
+		}
+		m.drive = drive
+		if m.Writable {
+			probeCtx, cancel := context.WithTimeout(mountCtx, 35*time.Second)
+			e = drive.probe(probeCtx)
+			cancel()
+			if e != nil {
+				if ctx.Err() != nil {
+					return nil, davSavedMount{}, ctx.Err()
+				}
+				m.warnWrite("/"+m.Alias, "", e, cl.redact.Text)
+				logDAV(mountCtx, runLogEntry{Operation: "写入通道检查", Source: "联通原生接口", Result: "警告", Error: cl.redact.Text(e.Error()), Detail: "写入检查失败不阻止 WebDAV 启动，继续验证目录读取。"})
+				m.WriteStatus = "写入通道未通过验证；读取能力单独检查"
+			} else {
+				m.WriteStatus = "写入通道已初始化；实际权限由每次云端操作核验"
+			}
+		}
+	} else if valueString(a.credentials["mobile_web_token"]) != "" {
+		m.drive = g.mobileAccountDrive(a)
+		if m.Root == "root" {
+			m.Root = "/"
+		}
+		m.WriteStatus = "移动官网独立读写"
+	} else {
+		m.drive = &mobileDAVDrive{originalDAVDrive: originalDAVDrive{client: cl}, onRefresh: func(access, refresh string) error { return g.saveDAVCredential(a, access, refresh) }, budget: transfers.connections, partMiB: cfg.UploadPartMiB}
+		if m.Writable {
+			m.WriteStatus = "开放接口写入受应用目录及后缀限制；尚需此账号实测"
+		}
+	}
+	// Fail before opening a port when the requested mount root cannot be listed.
+	probeCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
+	_, e = m.drive.List(probeCtx, m.Root)
+	cancel()
+	primaryReadable := e == nil
+	if e != nil {
+		if backupConfig == nil || !backupConfig.Verified {
+			return nil, davSavedMount{}, fmt.Errorf("挂载 %s 的目录验证失败：%s", m.Alias, cl.redact.Text(e.Error()))
+		}
+	}
+	savedMount := davSavedMount{UploadStorageMode: m.UploadStorageMode, Identity: m.Identity, Alias: m.Alias, Root: m.Root, Writable: m.Writable}
+	if backupConfig != nil {
+		g.mu.Lock()
+		g.extraSecrets = append(g.extraSecrets, backupConfig.Token, backupConfig.MetaPassword)
+		g.mu.Unlock()
+		backup, e := newOpenListClient(backupConfig.openListInput)
+		if e != nil {
+			return nil, davSavedMount{}, e
+		}
+		backup.budget = transfers.connections
+		backupConfig.Address, backupConfig.Root = backup.cfg.Address, backup.cfg.Root
+		u, _ := url.Parse(backup.cfg.Address)
+		if backup.cfg.Address == "http://"+g.host || u.Host == net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)) || u.Host == net.JoinHostPort("localhost", strconv.Itoa(cfg.Port)) {
+			return nil, davSavedMount{}, errors.New("OpenList 地址不能指向本工具管理界面")
+		}
+		backupUnavailable := false
+		if !backupConfig.Verified {
+			if e = verifyOpenList(mountCtx, m.drive, m.Root, backup, g.data); e != nil {
+				if !primaryReadable || !cloudWriteDenied(e) {
+					return nil, davSavedMount{}, errors.New(g.redactDAV(e.Error()))
+				}
+				backupUnavailable = true
+				m.warnWrite("/"+m.Alias, "", fmt.Errorf("OpenList 映射验证需要云端写入，当前被拒绝；本次使用已核验的内置读取通道，未启用 OpenList 备用：%w", e), g.redactDAV)
+			} else {
+				backupConfig.Verified = true
+			}
+		}
+		if e = g.saveOpenList(backupKey, *backupConfig); e != nil {
+			return nil, davSavedMount{}, e
+		}
+		if !backupUnavailable {
+			m.drive = &backupDAVDrive{primary: m.drive, backup: backup, root: m.Root, paths: map[string]string{m.Root: ""}, entries: map[string]davEntry{}}
+			checkCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
+			_, checkErr := m.drive.List(checkCtx, m.Root)
+			cancel()
+			if checkErr != nil {
+				return nil, davSavedMount{}, errors.New(g.redactDAV(checkErr.Error()))
+			}
+			m.WriteStatus += "；OpenList 仅作目录和下载备用，写入使用原生接口"
+		} else {
+			m.WriteStatus += "；OpenList 映射未核验，本次仅使用内置读取通道"
+		}
+		savedMount.OpenListEnabled, savedMount.OpenListAddress, savedMount.OpenListRoot = true, backup.cfg.Address, backup.cfg.Root
+	} else if sel.OpenList != nil && !sel.OpenList.Enabled {
+		if e = g.saveOpenList(backupKey, openListSaved{Identity: m.Identity}); e != nil {
+			return nil, davSavedMount{}, e
+		}
+	}
+	return m, savedMount, nil
 }
