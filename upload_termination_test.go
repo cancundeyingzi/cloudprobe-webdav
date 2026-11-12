@@ -72,7 +72,7 @@ func TestTerminationDiskSuccessMustRetainFailedBodyCleanup(t *testing.T) {
 	}
 	holder.held.Close()
 	id := strings.TrimSuffix(filepath.Base(owners[0]), ".json")
-	lease, e := lockUploadCheckpoint(filepath.Join(fs.spool, "owners", "lease-"+id[:2]))
+	lease, e := acquireKeyLease(context.Background(), filepath.Join(fs.spool, "owners"), id)
 	if e != nil {
 		t.Fatal(e)
 	}

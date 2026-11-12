@@ -157,7 +157,7 @@ func (d *davManager) reconcileMounts(ctx context.Context, slots chan struct{}) {
 			next.Mounts = append(append([]davSavedMount{}, cfg.Mounts...), m)
 			next.KnownAccounts = appendUnique(append([]string{}, cfg.KnownAccounts...), id)
 			lockCtx, lockCancel := context.WithTimeout(ctx, 2*time.Second)
-			lease, err := lockCheckpointCatalog(lockCtx, filepath.Join(d.app.data, "webdav-config.lock"))
+			lease, err := lockFileWait(lockCtx, filepath.Join(d.app.data, "webdav-config.lock"))
 			lockCancel()
 			if err == nil {
 				disk, readErr := readDAVConfig(filepath.Join(d.app.data, "webdav.json"))

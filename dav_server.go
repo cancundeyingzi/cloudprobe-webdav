@@ -199,7 +199,7 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	if err := os.MkdirAll(d.app.data, 0700); err != nil {
 		return nil, err
 	}
-	lease, err := lockCheckpointCatalog(ctx, filepath.Join(d.app.data, "webdav-config.lock"))
+	lease, err := lockFileWait(ctx, filepath.Join(d.app.data, "webdav-config.lock"))
 	if err != nil {
 		return nil, err
 	}

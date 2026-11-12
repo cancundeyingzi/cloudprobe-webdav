@@ -169,8 +169,7 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, nil, err
 	}
-	// Fixed lock stripes bound lock-file growth and survive process termination.
-	lease, err := lockUploadCheckpoint(filepath.Join(dir, "lease-"+key[:2]))
+	lease, err := acquireKeyLease(d.ctx, dir, key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("续传任务正在使用或无法加锁：%w", err)
 	}
@@ -297,22 +296,6 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 		return nil, nil, err
 	}
 	return c, release, nil
-}
-
-func lockCheckpointCatalog(ctx context.Context, path string) (*os.File, error) {
-	for attempt := 0; attempt < 50; attempt++ {
-		f, err := lockUploadCheckpoint(path)
-		if err == nil {
-			return f, nil
-		}
-		if attempt == 49 {
-			return nil, err
-		}
-		if err = davWait(ctx, 20*time.Millisecond); err != nil {
-			return nil, err
-		}
-	}
-	return nil, os.ErrPermission
 }
 
 func (d *davFile) uploadWithCheckpoint(c *uploadCheckpoint) (davEntry, error) {

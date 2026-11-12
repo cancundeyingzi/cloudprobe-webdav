@@ -64,7 +64,7 @@ func (d *davManager) recoverConfig(ctx context.Context, reset bool) (string, err
 	if running {
 		return "", errors.New("请先停止 WebDAV 后恢复配置")
 	}
-	lease, err := lockCheckpointCatalog(ctx, filepath.Join(d.app.data, "webdav-config.lock"))
+	lease, err := lockFileWait(ctx, filepath.Join(d.app.data, "webdav-config.lock"))
 	if err != nil {
 		return "", err
 	}

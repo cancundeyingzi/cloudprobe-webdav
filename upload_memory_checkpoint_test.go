@@ -42,7 +42,7 @@ func assertMemoryMetadataOnly(t *testing.T, spool string, body []byte) {
 		if filepath.Dir(path) != filepath.Join(spool, "resume") && filepath.Dir(path) != filepath.Join(spool, "resume", "history") {
 			t.Errorf("body spool created: %s", path)
 		}
-		if !strings.HasSuffix(d.Name(), ".bin") && !strings.HasPrefix(d.Name(), "lease-") && d.Name() != "catalog-lease" {
+		if !strings.HasSuffix(d.Name(), ".bin") && !strings.HasPrefix(d.Name(), "lease-") && !strings.HasPrefix(d.Name(), "lock-") && d.Name() != "catalog-lease" {
 			t.Errorf("unexpected disk artifact: %s", path)
 		}
 		b, err := os.ReadFile(path)
@@ -361,7 +361,7 @@ func TestMemoryCheckpointProcessHelper(t *testing.T) {
 	if file == "" {
 		t.Skip("subprocess-only helper")
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(filepath.Dir(file), "lease-bb"))
+	lease, err := tryLockFile(filepath.Join(filepath.Dir(file), "lease-bb"))
 	if err != nil {
 		t.Fatal(err)
 	}

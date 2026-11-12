@@ -25,7 +25,7 @@ type spoolOwnerData struct {
 type spoolOwner struct {
 	dir, file string
 	data      spoolOwnerData
-	lease     *os.File
+	lease     *keyLease
 }
 
 func validOwnerID(id string) bool {
@@ -72,13 +72,13 @@ func newOwnedSpool(ctx context.Context, dir, target string) (*os.File, *spoolOwn
 			return nil, nil, err
 		}
 		id := hex.EncodeToString(entropy[:])
-		lease, err := lockUploadCheckpoint(filepath.Join(owners, "lease-"+id[:2]))
+		lease, err := acquireKeyLease(ctx, owners, id)
 		if err != nil {
 			continue
 		}
-		catalog, err := lockCheckpointCatalog(ctx, filepath.Join(owners, "catalog-lease"))
+		catalog, err := lockFileWait(ctx, filepath.Join(owners, "catalog-lease"))
 		if err != nil {
-			lease.Close()
+			_ = lease.Close()
 			return nil, nil, err
 		}
 		entries, err := os.ReadDir(owners)
@@ -90,7 +90,7 @@ func newOwnedSpool(ctx context.Context, dir, target string) (*os.File, *spoolOwn
 		}
 		if err != nil || count >= 1024 {
 			catalog.Close()
-			lease.Close()
+			_ = lease.Close()
 			if err == nil {
 				err = errors.New("正文清理记录达到 1024 个上限，请先清理待处理正文")
 			}
@@ -99,14 +99,14 @@ func newOwnedSpool(ctx context.Context, dir, target string) (*os.File, *spoolOwn
 		o := &spoolOwner{dir: dir, file: filepath.Join(owners, id+".json"), lease: lease, data: spoolOwnerData{Version: 1, ID: id, Name: "upload-" + id, Target: target, Created: time.Now().UTC()}}
 		if err = writePrivateJSON(o.file, o.data); err != nil {
 			catalog.Close()
-			lease.Close()
+			_ = lease.Close()
 			return nil, nil, err
 		}
 		catalog.Close()
 		body, err := os.OpenFile(filepath.Join(dir, o.data.Name), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 		if err != nil {
 			_ = os.Remove(o.file)
-			lease.Close()
+			_ = lease.Close()
 			return nil, nil, err
 		}
 		return body, o, nil
@@ -132,7 +132,7 @@ func cleanupRegisteredSpool(dir, name, keep string) error {
 	id := strings.TrimPrefix(name, "upload-")
 	if validOwnerID(id) {
 		if _, err := os.Stat(filepath.Join(dir, "owners", id+".json")); err == nil {
-			lease, err := lockUploadCheckpoint(filepath.Join(dir, "owners", "lease-"+id[:2]))
+			lease, err := acquireKeyLease(context.Background(), filepath.Join(dir, "owners"), id)
 			if err != nil {
 				return err
 			}

@@ -113,7 +113,7 @@ func TestCheckpointProcessHelper(t *testing.T) {
 	if file == "" {
 		t.Skip("subprocess helper")
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(filepath.Dir(file), "process-lease"))
+	lease, err := tryLockFile(filepath.Join(filepath.Dir(file), "process-lease"))
 	if err != nil {
 		t.Fatal(err)
 	}

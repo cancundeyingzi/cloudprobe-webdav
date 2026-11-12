@@ -81,7 +81,7 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			} else {
-				lease, lockErr := lockUploadCheckpoint(filepath.Join(dir, "lease-"+key[:2]))
+				lease, lockErr := acquireKeyLease(r.Context(), dir, key)
 				if lockErr != nil {
 					rows = append(rows, map[string]any{"id": key, "state": "任务正在准备或提交"})
 					continue
@@ -162,7 +162,7 @@ func (g *guiApp) checkpointAPI(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(dir, "lease-"+input.ID[:2]))
+	lease, err := acquireKeyLease(r.Context(), dir, input.ID)
 	if err != nil {
 		respondJSON(w, 409, map[string]any{"error": "任务正在使用，请稍后重试"})
 		return

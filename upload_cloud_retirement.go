@@ -42,7 +42,7 @@ func (c *uploadCheckpoint) archive(ctx context.Context, state string) error {
 		return err
 	}
 	name := filepath.Join(dir, c.data.Key+"-"+hex.EncodeToString(digest[:])+".bin")
-	catalog, err := lockCheckpointCatalog(ctx, filepath.Join(dir, "catalog-lease"))
+	catalog, err := lockFileWait(ctx, filepath.Join(dir, "catalog-lease"))
 	if err != nil {
 		return err
 	}

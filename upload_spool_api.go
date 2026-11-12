@@ -26,7 +26,7 @@ func (g *guiApp) spoolCleanupAPI(w http.ResponseWriter, r *http.Request) {
 			if !validOwnerID(id) {
 				continue
 			}
-			lease, err := lockUploadCheckpoint(filepath.Join(dir, "owners", "lease-"+id[:2]))
+			lease, err := acquireKeyLease(r.Context(), filepath.Join(dir, "owners"), id)
 			if err != nil {
 				rows = append(rows, map[string]any{"id": id, "state": "接收或上传中", "busy": true})
 				continue
@@ -58,7 +58,7 @@ func (g *guiApp) spoolCleanupAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body ID", 400)
 		return
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(dir, "owners", "lease-"+in.ID[:2]))
+	lease, err := acquireKeyLease(r.Context(), filepath.Join(dir, "owners"), in.ID)
 	if err != nil {
 		respondJSON(w, 409, map[string]any{"error": "正文正在使用，暂不能清理"})
 		return

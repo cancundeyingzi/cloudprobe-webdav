@@ -446,7 +446,7 @@ func (g *guiApp) saveOpenList(key string, cfg openListSaved) error {
 	if err := os.MkdirAll(g.data, 0700); err != nil {
 		return err
 	}
-	lease, err := lockCheckpointCatalog(context.Background(), file+".lock")
+	lease, err := lockFileWait(context.Background(), file+".lock")
 	if err != nil {
 		return fmt.Errorf("OpenList 配置正在保存，请稍后重试：%w", err)
 	}

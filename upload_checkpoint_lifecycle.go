@@ -68,7 +68,7 @@ func (a *activeCheckpoint) pause() error {
 	a.cancel()
 	return err
 }
-func (c *uploadCheckpoint) releaseLease(lease *os.File) {
+func (c *uploadCheckpoint) releaseLease(lease *keyLease) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
@@ -103,7 +103,7 @@ func (c *uploadCheckpoint) publish(ctx context.Context) error {
 	if !c.provisional {
 		return nil
 	}
-	catalog, err := lockCheckpointCatalog(ctx, filepath.Join(filepath.Dir(c.file), "catalog-lease"))
+	catalog, err := lockFileWait(ctx, filepath.Join(filepath.Dir(c.file), "catalog-lease"))
 	if err != nil {
 		return err
 	}

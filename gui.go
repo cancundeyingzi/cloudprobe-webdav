@@ -753,6 +753,12 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		return 1, e
 	}
 	app := &guiApp{stage: "正在启动原版引擎", accounts: map[string]guiAccount{}, downloads: map[string]guiDownload{}, data: *data, nonce: randomKey(), host: listener.Addr().String(), shutdown: cancel}
+	if e = cleanupLegacyLockStripes(filepath.Join(*data, "webdav-spool", "resume")); e != nil {
+		return 1, e
+	}
+	if e = cleanupLegacyLockStripes(filepath.Join(*data, "webdav-spool", "owners")); e != nil {
+		return 1, e
+	}
 	app.enginePaths = enginePaths{Executable: exe, SDK: *sdk, Bridge: *bridgePath, Data: *data}
 	app.runLog = newRuntimeLog(*data, app.redactDAV)
 	defer app.runLog.close()

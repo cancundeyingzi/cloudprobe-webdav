@@ -35,7 +35,7 @@ func (g *guiApp) checkpointHistoryAPI(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				continue
 			}
-			lease, err := lockUploadCheckpoint(filepath.Join(resume, "lease-"+key[:2]))
+			lease, err := acquireKeyLease(r.Context(), resume, key)
 			if err != nil {
 				rows = append(rows, map[string]any{"id": id, "state": "关联任务正在使用", "busy": true})
 				continue
@@ -68,7 +68,7 @@ func (g *guiApp) checkpointHistoryAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid history ID", 400)
 		return
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(resume, "lease-"+key[:2]))
+	lease, err := acquireKeyLease(r.Context(), resume, key)
 	if err != nil {
 		respondJSON(w, 409, map[string]any{"error": "关联任务正在使用，稍后再处理历史记录"})
 		return

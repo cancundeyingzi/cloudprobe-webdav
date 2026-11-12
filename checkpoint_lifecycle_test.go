@@ -104,7 +104,7 @@ func TestLifecycleRetiredPauseCannotResurrectOrModifyNewOwner(t *testing.T) {
 	if err := c.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(filepath.Dir(file), "lease-bb"))
+	lease, err := acquireKeyLease(context.Background(), filepath.Dir(file), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestLifecycleRetiredPauseCannotResurrectOrModifyNewOwner(t *testing.T) {
 	if err = next.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
-	lease, err = lockUploadCheckpoint(filepath.Join(filepath.Dir(file), "lease-bb"))
+	lease, err = acquireKeyLease(context.Background(), filepath.Dir(file), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestLifecycleRetirementSharesPauseCriticalSection(t *testing.T) {
 	if err := c.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := lockUploadCheckpoint(filepath.Join(filepath.Dir(c.file), "lease"))
+	lease, err := acquireKeyLease(context.Background(), filepath.Dir(c.file), strings.Repeat("c", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
