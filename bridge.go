@@ -274,7 +274,7 @@ func (b *OriginalBridge) exchange(command *bridgeCommand) (BridgeReply, error) {
 				b.kill()
 				return r, fmt.Errorf("SDK 操作结果未知，已终止桥接：%s", r.Error)
 			}
-			return r, errors.New(r.Error)
+			return r, &bridgeResponseError{Code: r.Code, Message: r.Error}
 		}
 		return r, nil
 	case <-b.stopping:

@@ -171,10 +171,11 @@ func (d *mobileDAVDrive) ReadRoutes(ctx context.Context, it davEntry) []readRout
 }
 
 type resolvedReadRoute struct {
-	route  readRoute
-	mu     sync.Mutex
-	target readTarget
-	until  time.Time
+	denials forbiddenRetries
+	route   readRoute
+	mu      sync.Mutex
+	target  readTarget
+	until   time.Time
 }
 
 func (r *resolvedReadRoute) get(ctx context.Context) (readTarget, error) {

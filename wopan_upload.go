@@ -246,6 +246,7 @@ func (u *wopanUploadSession) part(ctx context.Context, f io.ReaderAt, index, par
 	off := (index - 1) * u.partSize
 	n := min(u.partSize, u.size-off)
 	var err error
+	var denials forbiddenRetries
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -398,6 +399,12 @@ func (u *wopanUploadSession) part(ctx context.Context, f io.ReaderAt, index, par
 		var transient *wopanPartError
 		if !errors.As(err, &transient) || !transient.Retry || ctx.Err() != nil {
 			return "", err
+		}
+		if failure := denials.failure(err); !retryableTransfer(failure) {
+			var exhausted *persistentForbiddenError
+			if errors.As(failure, &exhausted) {
+				return "", failure
+			}
 		}
 		if transient.Auth && u.refreshAuth != nil {
 			if lockErr := u.authLock.LockContext(ctx); lockErr != nil {

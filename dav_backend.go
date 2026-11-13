@@ -253,13 +253,6 @@ func (d *wopanDAVDrive) probe(ctx context.Context) error {
 	return nil
 }
 
-func wopanAuthError(e error) bool {
-	if e == nil {
-		return false
-	}
-	s := e.Error()
-	return strings.Contains(s, "1001") || strings.Contains(s, "9999") || strings.Contains(s, "无效登录") || strings.Contains(s, "授权/会话失效") || strings.Contains(s, "token expired")
-}
 func (d *wopanDAVDrive) List(ctx context.Context, dir string) ([]davEntry, error) {
 	if d.client.bridge == nil && d.client.cfg.Transport == "bridge" {
 		if err := d.directMu.LockContext(ctx); err != nil {
@@ -560,6 +553,7 @@ func (d *wopanDAVDrive) verifyUploaded(ctx context.Context, parent, name string,
 }
 
 type wopanPartError struct {
+	HTTPStatus      int
 	Message         string
 	Retry           bool
 	ResetConnection bool
@@ -568,6 +562,12 @@ type wopanPartError struct {
 }
 
 func (e *wopanPartError) Error() string { return e.Message }
+func (e *wopanPartError) Unwrap() error {
+	if e.HTTPStatus != 0 {
+		return &upstreamHTTPError{code: e.HTTPStatus, after: e.RetryAfter, source: "联通上传节点"}
+	}
+	return nil
+}
 func sendWopanPart(client *http.Client, req *http.Request) (wopan.Upload2CResp, error) {
 	return sendWopanPartActive(client, req, nil)
 }
@@ -591,7 +591,7 @@ func sendWopanPartActive(client *http.Client, req *http.Request, guard *uploadId
 		return result, &wopanPartError{Message: e.Error(), Retry: req.Context().Err() == nil, ResetConnection: true}
 	}
 	if response.StatusCode != 200 {
-		return result, &wopanPartError{Message: fmt.Sprintf("联通上传节点 HTTP %d", response.StatusCode), Retry: retryableHTTP(response.StatusCode), RetryAfter: retryAfterHeader(response.Header), Auth: response.StatusCode == 401 || response.StatusCode == 403}
+		return result, &wopanPartError{HTTPStatus: response.StatusCode, Message: fmt.Sprintf("联通上传节点 HTTP %d", response.StatusCode), Retry: retryableHTTP(response.StatusCode), RetryAfter: retryAfterHeader(response.Header), Auth: response.StatusCode == 401 || response.StatusCode == 403}
 	}
 	if e = json.Unmarshal(raw, &result); e != nil {
 		return result, errors.New("联通上传响应不是有效 JSON；本次结果需要核对目录")

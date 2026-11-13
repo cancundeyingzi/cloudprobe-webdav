@@ -36,7 +36,7 @@ func (w *WoClient) request(channel string, key string, param, other Json, resp i
 		return res.Bytes(), &ResponseError{HTTPStatus: res.StatusCode(), Detail: fmt.Sprintf("request failed with status: %s", res.Status())}
 	}
 	if _resp.Status != "200" {
-		return res.Bytes(), &ResponseError{HTTPStatus: res.StatusCode(), Detail: fmt.Sprintf("request failed with status: %s, msg: %s", _resp.Status, _resp.Msg)}
+		return res.Bytes(), &ResponseError{HTTPStatus: res.StatusCode(), Message: _resp.Msg, Detail: fmt.Sprintf("request failed with status: %s, msg: %s", _resp.Status, _resp.Msg)}
 	}
 	if _resp.Rsp.RspCode != "0000" {
 		if channel != ChannelAPIUser && retry && _resp.Rsp.RspCode == "9999" {
@@ -46,7 +46,7 @@ func (w *WoClient) request(channel string, key string, param, other Json, resp i
 			}
 			return w.request(channel, key, param, other, resp, false, opts...)
 		}
-		return res.Bytes(), &ResponseError{HTTPStatus: res.StatusCode(), RspCode: _resp.Rsp.RspCode, Detail: fmt.Sprintf("request failed with rsp_code: %s,rep_desc: %s", _resp.Rsp.RspCode, _resp.Rsp.RspDesc)}
+		return res.Bytes(), &ResponseError{HTTPStatus: res.StatusCode(), RspCode: _resp.Rsp.RspCode, Message: _resp.Rsp.RspDesc, Detail: fmt.Sprintf("request failed with rsp_code: %s,rep_desc: %s", _resp.Rsp.RspCode, _resp.Rsp.RspDesc)}
 	}
 	if resp != nil {
 		data := string(_resp.Rsp.Data)

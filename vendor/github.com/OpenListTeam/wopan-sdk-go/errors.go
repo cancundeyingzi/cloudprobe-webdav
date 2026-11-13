@@ -6,6 +6,7 @@ type ResponseError struct {
 	HTTPStatus int
 	RspCode    string
 	Detail     string
+	Message    string
 }
 
 func (e *ResponseError) Error() string { return e.Detail }

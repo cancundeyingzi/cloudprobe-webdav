@@ -1,13 +1,9 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -30,22 +26,4 @@ func retryAfterHeader(h http.Header) time.Duration {
 		return max(0, time.Until(at))
 	}
 	return 0
-}
-func retryableTransfer(err error) bool {
-	var h *upstreamHTTPError
-	if errors.As(err, &h) {
-		return retryableHTTP(h.code)
-	}
-	var network net.Error
-	if errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	if err != nil {
-		for _, text := range []string{"授权/会话失效", "token expired", "HTTP 401", "HTTP 403", "HTTP 408", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504"} {
-			if strings.Contains(err.Error(), text) {
-				return true
-			}
-		}
-	}
-	return false
 }

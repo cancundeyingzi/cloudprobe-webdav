@@ -119,7 +119,8 @@ func (c *openListClient) call(ctx context.Context, method, endpoint string, inpu
 	}
 	code := number(result["code"])
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || code != 200 {
-		return nil, fmt.Errorf("OpenList HTTP %d / 业务码 %d：%s", resp.StatusCode, code, valueString(result["message"]))
+		failure := &apiBusinessError{Code: fmt.Sprint(code), Message: valueString(result["message"])}
+		return nil, &apiHTTPError{Code: resp.StatusCode, Err: fmt.Errorf("OpenList HTTP %d / %w", resp.StatusCode, failure)}
 	}
 	return object(result["data"]), nil
 }

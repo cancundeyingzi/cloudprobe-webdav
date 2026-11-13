@@ -411,6 +411,7 @@ func (e *quarkPartError) Error() string { return e.HTTP.Error() + e.Detail }
 func (e *quarkPartError) Unwrap() error { return e.HTTP }
 
 func (u *quarkUpload) part(ctx context.Context, source io.ReaderAt, index, parts, off, n int64, sent, confirmed *atomic.Int64) (string, error) {
+	var denials forbiddenRetries
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -511,6 +512,7 @@ func (u *quarkUpload) part(ctx context.Context, source io.ReaderAt, index, parts
 			entry.Error = u.drive.client.scrub(err.Error())
 			logDAV(ctx, entry)
 		}
+		err = denials.failure(err)
 		if !retryableTransfer(err) {
 			return "", err
 		}

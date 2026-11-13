@@ -81,8 +81,13 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 				return nil, nil, 0, ctx.Err()
 			}
 			route := s.routes[index]
+			if err := route.denials.stopped(); err != nil {
+				failures = append(failures, err)
+				continue
+			}
 			target, e := route.get(ctx)
 			if e != nil {
+				e = route.denials.failure(e)
 				retryable = retryable || retryableTransfer(e)
 				failures = append(failures, e)
 				s.health.bad(route.route.Name)
@@ -178,6 +183,7 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 			cancelRequest()
 			release()
 			route.invalidate()
+			e = route.denials.failure(e)
 			retryable = retryable || retryableTransfer(e)
 			var upstream *upstreamHTTPError
 			if errors.As(e, &upstream) {
