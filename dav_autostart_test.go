@@ -24,11 +24,11 @@ func asyncFixture(t *testing.T) (*davManager, davStartInput) {
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	t.Cleanup(d.Stop)
-	return d, davStartInput{background: true, Port: port, Username: "tester", Password: "test-password-123", transferOptions: transferOptions{UploadStorageMode: "auto"}}
+	return d, davStartInput{Port: port, Username: "tester", Password: "test-password-123", transferOptions: transferOptions{UploadStorageMode: "auto"}}
 }
 func awaitLoads(t *testing.T, d *davManager, predicate func(map[string]davLoadState) bool) {
 	t.Helper()
-	deadline := time.Now().Add(6 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		d.mu.Lock()
 		s := cloneLoadStates(d.loads)
@@ -157,4 +157,73 @@ func TestDAVAsyncRestoresMultipleReadonlyRoots(t *testing.T) {
 	delete(d.app.accounts, "same")
 	d.app.mu.Unlock()
 	awaitLoads(t, d, func(s map[string]davLoadState) bool { return len(d.fs.mountSnapshot()) == 0 })
+}
+
+func TestDAVRemountFailureKeepsPreviousMountAndRetries(t *testing.T) {
+	d, in := asyncFixture(t)
+	addAsyncAccount(d, "acct")
+	in.Mounts = []davMountInput{{Account: "acct", Alias: "one", Root: "0"}}
+	fake := newFakeDAV(t)
+	var fail atomic.Bool
+	var calls atomic.Int64
+	d.mountLoader = func(ctx context.Context, selection davMountInput, account guiAccount) (*davMount, error) {
+		calls.Add(1)
+		if fail.Load() {
+			return nil, errors.New("temporary validation failure")
+		}
+		return &davMount{Alias: selection.Alias, Root: selection.Root, Identity: davIdentity(account), drive: fake}, nil
+	}
+	if _, err := d.Start(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	awaitLoads(t, d, func(states map[string]davLoadState) bool {
+		return states["acct"].State == "mounted" && calls.Load() == 1
+	})
+	firstMount := d.fs.mountSnapshot()[0]
+	fail.Store(true)
+	d.app.mu.Lock()
+	account := d.app.accounts["acct"]
+	account.credentials = map[string]any{"user_id": "acct", "token": "renewed"}
+	d.app.accounts["acct"] = account
+	d.app.mu.Unlock()
+	awaitLoads(t, d, func(states map[string]davLoadState) bool { return states["acct"].State == "failed" })
+	if got := d.fs.mountSnapshot(); len(got) != 1 || got[0] != firstMount {
+		t.Fatal("working mount was removed after revalidation failure")
+	}
+	if state := d.Status()["account_loads"].(map[string]davLoadState)["acct"]; !state.Kept || state.Retry == 0 {
+		t.Fatal("retry state not exposed", state)
+	}
+	fail.Store(false)
+	awaitLoads(t, d, func(states map[string]davLoadState) bool {
+		return states["acct"].State == "mounted" && calls.Load() >= 3
+	})
+}
+
+func TestDAVInitialMountFailureRetriesAutomatically(t *testing.T) {
+	d, in := asyncFixture(t)
+	addAsyncAccount(d, "acct")
+	in.Mounts = []davMountInput{{Account: "acct", Alias: "one", Root: "0"}}
+	fake := newFakeDAV(t)
+	var calls atomic.Int64
+	d.mountLoader = func(ctx context.Context, selection davMountInput, account guiAccount) (*davMount, error) {
+		if calls.Add(1) == 1 {
+			return nil, errors.New("network not ready")
+		}
+		return &davMount{Alias: selection.Alias, Root: selection.Root, Identity: davIdentity(account), drive: fake}, nil
+	}
+	if _, err := d.Start(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	awaitLoads(t, d, func(states map[string]davLoadState) bool {
+		return states["acct"].State == "mounted" && calls.Load() == 2
+	})
+}
+
+func TestMountRetryDelayIsBounded(t *testing.T) {
+	if got := mountRetryDelay(0); got != 5*time.Second {
+		t.Fatal(got)
+	}
+	if got := mountRetryDelay(5 * time.Minute); got != 5*time.Minute {
+		t.Fatal(got)
+	}
 }

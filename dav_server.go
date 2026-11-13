@@ -33,8 +33,7 @@ type davMountInput struct {
 	Writable          bool           `json:"writable"`
 }
 type davStartInput struct {
-	background bool
-	restore    bool
+	restore bool
 	transferOptions
 	Listen            string          `json:"listen"`
 	Port              int             `json:"port"`
@@ -83,7 +82,9 @@ type davActivity struct {
 	Error          string `json:"error,omitempty"`
 }
 type davManager struct {
-	jobs map[string]davLoadState
+	jobs       map[string]davLoadState
+	retryAt    map[string]time.Time
+	retryDelay map[string]time.Duration
 	// Tests can isolate slow and failing providers while exercising the real listener and loader lifecycle.
 	mountLoader       func(context.Context, davMountInput, guiAccount) (*davMount, error)
 	mountInputs       map[string]davMountInput
@@ -330,19 +331,6 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	for _, sel := range in.Mounts {
 		a := accounts[sel.Account]
 		saved := savedMountInput(sel, a)
-		if !in.background {
-			m, resolved, err := d.prepareMount(ctx, sel, a, cfg, transfers)
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if err != nil {
-				loads[sel.Account] = davLoadState{State: "failed", Error: g.redactDAV(err.Error())}
-			} else {
-				mounts = append(mounts, m)
-				saved = resolved
-				loads[sel.Account] = davLoadState{State: "mounted"}
-			}
-		}
 		if !in.restore {
 			cfg.Mounts = append(cfg.Mounts, saved)
 		}
@@ -379,11 +367,8 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 	d.loads = loads
 	d.jobs = map[string]davLoadState{}
 	d.attempted = map[string]guiAccount{}
-	if !in.background {
-		for _, sel := range in.Mounts {
-			d.attempted[sel.Account] = accounts[sel.Account]
-		}
-	}
+	d.retryAt = map[string]time.Time{}
+	d.retryDelay = map[string]time.Duration{}
 	d.generatedPassword = ""
 	if raw, err := base64.StdEncoding.DecodeString(cfg.GeneratedPassword); err == nil && len(raw) > 0 {
 		if plain, err := unprotectLocal(raw); err == nil {
@@ -405,9 +390,7 @@ func (d *davManager) Start(ctx context.Context, in davStartInput) (map[string]an
 			d.mu.Unlock()
 		}
 	}()
-	if in.background {
-		go d.watchMounts(serviceCtx)
-	}
+	go d.watchMounts(serviceCtx)
 	g.event(fmt.Sprintf("WebDAV 已启动，挂载 %d 个云盘", len(mounts)))
 	out := d.Status()
 	if generated != "" {
@@ -932,7 +915,6 @@ func (g *guiApp) davAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	g.op.Lock()
 	defer g.op.Unlock()
-	in.background = true
 	out, e := g.dav.Start(r.Context(), in)
 	if e != nil {
 		g.fail(w, errors.New(g.redactDAV(e.Error())))

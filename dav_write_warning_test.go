@@ -161,6 +161,7 @@ func TestDAVSkipsUnreadableCloudAndRejectsCanceledStart(t *testing.T) {
 	if d.Status()["running"] != true || len(d.mounts) != 0 {
 		t.Fatal("failed cloud should leave empty running service")
 	}
+	awaitLoads(t, d, func(states map[string]davLoadState) bool { return states["a"].State == "failed" })
 	if len(d.config.Mounts) != 1 || d.loads["a"].State != "failed" {
 		t.Fatal("failed mount configuration or error lost")
 	}

@@ -16,6 +16,15 @@ import (
 type davLoadState struct {
 	State string `json:"state"`
 	Error string `json:"error,omitempty"`
+	Kept  bool   `json:"kept_previous,omitempty"`
+	Retry int64  `json:"retry_after_seconds,omitempty"`
+}
+
+func mountRetryDelay(previous time.Duration) time.Duration {
+	if previous <= 0 {
+		return 5 * time.Second
+	}
+	return min(5*time.Minute, previous*2)
 }
 
 func cloneLoadStates(src map[string]davLoadState) map[string]davLoadState {
@@ -48,7 +57,7 @@ func (d *davManager) AutoStart(ctx context.Context) {
 	if port == 0 {
 		port = 50146
 	}
-	_, err := d.Start(ctx, davStartInput{background: true, restore: true, Listen: c.Listen, Port: port, Username: c.Username, MaxUploadMiB: c.MaxUploadMiB, UploadConcurrency: c.UploadConcurrency, UploadMode: c.UploadMode, transferOptions: c.transferOptions})
+	_, err := d.Start(ctx, davStartInput{restore: true, Listen: c.Listen, Port: port, Username: c.Username, MaxUploadMiB: c.MaxUploadMiB, UploadConcurrency: c.UploadConcurrency, UploadMode: c.UploadMode, transferOptions: c.transferOptions})
 	if err != nil {
 		msg := d.app.redactDAV(err.Error())
 		d.mu.Lock()
@@ -112,6 +121,8 @@ func (d *davManager) reconcileMounts(ctx context.Context, slots chan struct{}) {
 			delete(d.attempted, key)
 			delete(d.loads, a.Key)
 			delete(d.jobs, key)
+			delete(d.retryAt, key)
+			delete(d.retryDelay, key)
 		}
 	}
 	d.mu.Unlock()
@@ -195,7 +206,9 @@ func (d *davManager) reconcileMounts(ctx context.Context, slots chan struct{}) {
 			d.mu.Lock()
 			old, attempted := d.attempted[selected.Alias]
 			state := d.jobs[selected.Alias]
-			if state.State == "loading" || attempted && reflect.DeepEqual(old.credentials, a.credentials) && reflect.DeepEqual(old.Channels, a.Channels) {
+			changed := attempted && (!reflect.DeepEqual(old.credentials, a.credentials) || !reflect.DeepEqual(old.Channels, a.Channels))
+			retryDue := state.State == "failed" && !d.retryAt[selected.Alias].IsZero() && !time.Now().Before(d.retryAt[selected.Alias])
+			if state.State == "loading" || attempted && !changed && !retryDue {
 				d.mu.Unlock()
 				continue
 			}
@@ -250,18 +263,38 @@ func (d *davManager) reconcileMounts(ctx context.Context, slots chan struct{}) {
 					return
 				}
 				state := davLoadState{State: "mounted"}
+				var previous *davMount
 				if err != nil {
 					state = davLoadState{State: "failed", Error: message}
+					state.Retry = int64(mountRetryDelay(d.retryDelay[sel.Alias]).Seconds())
+					for _, existing := range d.mounts {
+						if existing.Alias == sel.Alias {
+							state.Kept = true
+							previous = existing
+							break
+						}
+					}
 				}
 				d.setLoadState(sel.Alias, a.Key, state)
+				if err == nil {
+					delete(d.retryAt, sel.Alias)
+					delete(d.retryDelay, sel.Alias)
+				} else {
+					d.retryDelay[sel.Alias] = mountRetryDelay(d.retryDelay[sel.Alias])
+					d.retryAt[sel.Alias] = time.Now().Add(d.retryDelay[sel.Alias])
+				}
 				next := make([]*davMount, 0, len(d.mounts)+1)
 				for _, existing := range d.mounts {
 					if existing.Alias != sel.Alias {
 						next = append(next, existing)
 					}
 				}
-				if err == nil {
-					next = append(next, m)
+				if err == nil || state.Kept {
+					if err == nil {
+						next = append(next, m)
+					} else {
+						next = append(next, previous)
+					}
 				}
 				slices.SortFunc(next, func(a, b *davMount) int {
 					if a.Alias < b.Alias {
@@ -296,7 +329,7 @@ func (d *davManager) retryMount(account string) error {
 	}
 	for alias, a := range d.attempted {
 		if a.Key == account {
-			delete(d.attempted, alias)
+			d.retryAt[alias] = time.Now()
 		}
 	}
 	return nil

@@ -68,7 +68,7 @@ function paintConsoleStatus(s) {
     info.append(name,provider,badge);
     const load=(d.account_loads||{})[account.key],statusLine=document.createElement('p'),actions=document.createElement('div');
     statusLine.className='account-load '+(running&&load?load.state:'');
-    statusLine.textContent=!running?'服务已停止':!load?'未挂载':load.state==='mounted'?'已挂载':load.state==='loading'?'正在加载…':'加载失败：'+load.error;
+    statusLine.textContent=!running?'服务已停止':!load?'未挂载':load.state==='mounted'?'已挂载':load.state==='loading'?'正在加载…':(load.kept_previous?'沿用已验证挂载；':'')+'加载失败：'+load.error+(load.retry_after_seconds?'；约 '+load.retry_after_seconds+' 秒后自动重试':'');
     actions.className='account-actions';
     if(running&&load&&load.state==='failed'){const retry=document.createElement('button');retry.className='small';retry.textContent='重试加载';retry.onclick=async()=>{retry.disabled=true;try{await api('webdav/retry',{account:account.key});await status()}catch(e){notice(e.message)}};actions.append(retry)}
     const login=document.createElement('button');login.className='small';login.textContent=load&&load.state==='failed'?'重新登录':'补充授权';login.onclick=()=>openLogin(account.provider,account.key);actions.append(login);
