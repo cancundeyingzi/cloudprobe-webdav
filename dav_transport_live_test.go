@@ -94,7 +94,7 @@ func TestLiveWopanTransportAndConcurrentOperations(t *testing.T) {
 	if !d.usingWeb {
 		t.Fatal("未使用官网授权，停止对照")
 	}
-	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: true, drive: d}}, spool: filepath.Join(profile, "transport-spool"), maxUpload: 512 << 20, cache: map[string]davCache{}}
+	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: true, drive: d}}, spool: filepath.Join(profile, "transport-spool"), maxUpload: 512 << 20}
 	password := randomKey()
 	salt := []byte(randomKey()[:16])
 	hash, _ := pbkdf2.Key(sha256.New, password, salt, 100000, 32)

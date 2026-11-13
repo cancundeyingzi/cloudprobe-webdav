@@ -92,6 +92,7 @@ func TestDAVStartsWithReadableCloudWhenWriteProbeFails(t *testing.T) {
 			if status["running"] != true {
 				t.Fatal("service not running")
 			}
+			awaitLoads(t, d, func(states map[string]davLoadState) bool { return states["a"].State == "mounted" })
 			base := fmt.Sprintf("http://127.0.0.1:%d", in.Port)
 			wantDAV(t, base, "PROPFIND", "/盘/", "", 207, map[string]string{"Depth": "1"})
 			if got := wantDAV(t, base, "GET", "/盘/old.txt", "", 200, nil); string(got) != body {

@@ -71,7 +71,7 @@ func TestLiveWopanUploadConcurrencyBenchmark(t *testing.T) {
 	if !d.usingWeb {
 		t.Fatal("测试没有使用官网授权，不做不等价的速度对照")
 	}
-	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: true, drive: d}}, spool: filepath.Join(profile, "webdav-spool"), maxUpload: 64 << 20, cache: map[string]davCache{}}
+	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: true, drive: d}}, spool: filepath.Join(profile, "webdav-spool"), maxUpload: 64 << 20}
 	password := randomKey()
 	salt := []byte(randomKey()[:16])
 	hash, _ := pbkdf2.Key(sha256.New, password, salt, 100000, 32)

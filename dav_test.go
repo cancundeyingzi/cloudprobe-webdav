@@ -130,7 +130,7 @@ func (d *fakeDAVDrive) Move(ctx context.Context, it davEntry, parent, name strin
 
 func testDAVService(t *testing.T, writable bool) (*httptest.Server, *fakeDAVDrive, *davFS) {
 	d := newFakeDAV(t)
-	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: writable, drive: d}}, spool: t.TempDir(), maxUpload: 64 << 20, cache: map[string]davCache{}}
+	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: writable, drive: d}}, spool: t.TempDir(), maxUpload: 64 << 20}
 	fs.transfers = newTransferRuntime(transferOptions{UploadStorageMode: "disk"})
 	salt := []byte("1234567890123456")
 	hash, _ := pbkdf2.Key(sha256.New, "test-password-123", salt, 100000, 32)

@@ -11,19 +11,16 @@ import (
 // A conditional mutation cannot use a recently cached directory snapshot.
 // Reads requesting HTTP validators also need fresh metadata before ServeContent.
 func (f *davFS) refreshPath(name string) {
-	clean, err := davPath(name)
-	if err != nil {
-		return
-	}
-	alias := strings.Split(strings.TrimPrefix(clean, "/"), "/")[0]
-	f.cacheMu.Lock()
-	defer f.cacheMu.Unlock()
-	f.cacheVersion++
-	for key := range f.cache {
-		if strings.HasPrefix(key, alias+"\x00") {
-			delete(f.cache, key)
+	f.dirCache.invalidatePath(name)
+}
+
+func davNeedsFreshRead(r *http.Request) bool {
+	for _, header := range []string{"If-Match", "If-None-Match", "If-Range", "If-Modified-Since", "If-Unmodified-Since"} {
+		if r.Header.Get(header) != "" {
+			return true
 		}
 	}
+	return false
 }
 
 type davTagList struct {

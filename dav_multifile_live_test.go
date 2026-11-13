@@ -106,7 +106,7 @@ func TestLiveMultiFileTransfersAndFallback(t *testing.T) {
 	runtime := newTransferRuntime(transferOptions{})
 	driver.uploadBudget = runtime.connections
 	mount := &davMount{Alias: "联通云盘-1", Root: "0", Provider: "wopan", Writable: true, drive: d, health: &routeHealth{}}
-	fs := &davFS{mounts: []*davMount{mount}, spool: filepath.Join(profile, "multi-spool"), maxUpload: 128 << 20, cache: map[string]davCache{}, transfers: runtime}
+	fs := &davFS{mounts: []*davMount{mount}, spool: filepath.Join(profile, "multi-spool"), maxUpload: 128 << 20, transfers: runtime}
 	password := randomKey()
 	salt := []byte(randomKey()[:16])
 	hash, _ := pbkdf2.Key(sha256.New, password, salt, 100000, 32)

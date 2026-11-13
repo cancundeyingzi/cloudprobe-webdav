@@ -41,9 +41,8 @@ type davFS struct {
 	spool        string
 	maxUpload    int64
 	cacheMu      sync.Mutex
-	cache        map[string]davCache
+	dirCache     davDirCache
 	quotas       map[string]*davQuotaCache
-	cacheVersion uint64
 	reservations davReservations
 	transfers    *transferRuntime
 }
@@ -132,50 +131,6 @@ func davPath(name string) (string, error) {
 		}
 	}
 	return path.Clean("/" + name), nil
-}
-func (f *davFS) listing(ctx context.Context, m *davMount, dir string) ([]davEntry, error) {
-	k := m.Alias + "\x00" + dir
-	f.cacheMu.Lock()
-	if c, ok := f.cache[k]; ok && time.Now().Before(c.until) {
-		f.cacheMu.Unlock()
-		logDAV(ctx, runLogEntry{Operation: "读取目录", Source: "本机目录缓存", Result: "命中", Count: len(c.entries), Detail: "缓存有效期 3 秒；本次未请求网盘接口"})
-		return c.entries, nil
-	}
-	// Do not reinsert a listing that raced a completed mutation.
-	version := f.cacheVersion
-	f.cacheMu.Unlock()
-	a, e := m.drive.List(ctx, dir)
-	if e != nil {
-		return nil, davCloudError(ctx, e)
-	}
-	for _, it := range a {
-		if it.Name == "" || it.Name == "." || it.Name == ".." || strings.ContainsAny(it.Name, "/\\\x00\r\n") || it.ID == "" {
-			return nil, davCloudError(ctx, errors.New("云盘返回了缺少名称、ID 或含路径分隔符的条目，停止映射目录"))
-		}
-	}
-	f.cacheMu.Lock()
-	if f.cache == nil {
-		f.cache = map[string]davCache{}
-	}
-	if f.cacheVersion == version {
-		f.cache[k] = davCache{entries: a, until: time.Now().Add(3 * time.Second)}
-	}
-	f.cacheMu.Unlock()
-	return a, nil
-}
-func (f *davFS) invalidate(m *davMount) {
-	f.cacheMu.Lock()
-	defer f.cacheMu.Unlock()
-	f.cacheVersion++
-	quotaKey, _ := quotaAccountKey(m)
-	if q := f.quotas[quotaKey]; q != nil {
-		q.epoch.Add(1)
-	}
-	for k := range f.cache {
-		if strings.HasPrefix(k, m.Alias+"\x00") {
-			delete(f.cache, k)
-		}
-	}
 }
 func (f *davFS) lookup(ctx context.Context, name string) (davNode, error) {
 	clean, e := davPath(name)

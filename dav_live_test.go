@@ -197,7 +197,7 @@ func TestLiveWebDAVWopanCRUD(t *testing.T) {
 	if e = drive.probe(ctx); e != nil {
 		t.Fatal(cl.redact.Text(e.Error()))
 	}
-	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Writable: true, Provider: "wopan", drive: drive}}, spool: filepath.Join(profile, "live-webdav-spool"), maxUpload: 64 << 20, cache: map[string]davCache{}}
+	fs := &davFS{mounts: []*davMount{{Alias: "联通云盘-1", Root: "0", Writable: true, Provider: "wopan", drive: drive}}, spool: filepath.Join(profile, "live-webdav-spool"), maxUpload: 64 << 20}
 	fs.transfers = newTransferRuntime(transferOptions{})
 	drive.uploadBudget = fs.transfers.connections
 	drive.uploadPartMiB = 5
