@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestEngineDiagnosticClassifiesActionableFailures(t *testing.T) {
@@ -44,7 +46,7 @@ func TestEngineDiagnosticsCaptureRealExitWithoutLeakingCredentials(t *testing.T)
 	if err == nil {
 		t.Fatal("child did not fail")
 	}
-	bridge := &OriginalBridge{cmd: cmd, lastErr: err, stderr: tail, done: make(chan struct{})}
+	bridge := &OriginalBridge{cmd: cmd, lastErr: err, stderr: tail, done: make(chan struct{}), exited: true, exitCode: cmd.ProcessState.ExitCode()}
 	close(bridge.done)
 	g := &guiApp{bridge: bridge, extraSecrets: map[string]struct{}{"private-unlabelled-value": {}}, enginePaths: enginePaths{SDK: "example/sdk", Bridge: "example/bridge/CloudProbe.Bridge.dll", Data: "example/data"}}
 	status := g.publicStatus()
@@ -72,8 +74,55 @@ func TestEngineDiagnosticChild(t *testing.T) {
 	if os.Getenv("CLOUDPROBE_ENGINE_DIAGNOSTIC_CHILD") != "1" {
 		return
 	}
+	if os.Getenv("CLOUDPROBE_ENGINE_DIAGNOSTIC_CHILD_WAIT") == "1" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	}
 	fmt.Fprintln(os.Stderr, "DllNotFoundException: missing-native.dll\naccess_token=never-show-this-token\nprivate-unlabelled-value")
 	os.Exit(7)
+}
+
+func TestEngineDiagnosticsAreConcurrentWithProcessExit(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestEngineDiagnosticChild$")
+	cmd.Env = append(os.Environ(), "CLOUDPROBE_ENGINE_DIAGNOSTIC_CHILD=1", "CLOUDPROBE_ENGINE_DIAGNOSTIC_CHILD_WAIT=1")
+	hideChildWindow(cmd)
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	b := &OriginalBridge{cmd: cmd, done: make(chan struct{}), stopping: make(chan struct{})}
+	close(b.stopping)
+	go b.waitProcess()
+	if b.Alive() || !strings.Contains(b.exitError().Error(), "尚未取得") {
+		t.Fatal("stopping process was reported as already reaped")
+	}
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Go(func() {
+			for {
+				select {
+				case <-b.done:
+					return
+				default:
+					_ = b.exitError()
+				}
+			}
+		})
+	}
+	_ = in.Close()
+	select {
+	case <-b.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not exit")
+	}
+	readers.Wait()
+	if !strings.Contains(b.exitError().Error(), "退出码：7") {
+		t.Fatal("published exit code was lost")
+	}
 }
 
 func TestEngineErrorTailIsBoundedAndConcurrent(t *testing.T) {

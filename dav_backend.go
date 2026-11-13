@@ -23,6 +23,7 @@ import (
 )
 
 type davEntry struct {
+	backupPath     *backupPathNode
 	ContentVersion string `json:"-"`
 	Parent         string `json:"-"`
 	Item

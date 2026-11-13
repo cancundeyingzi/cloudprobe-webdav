@@ -28,7 +28,7 @@ func TestReleaseOpenListHTTPFallbackPreservesSourceAndDestination(t *testing.T) 
 	wantDAV(t, server.URL, "PUT", root+"target.txt", "old target", 201, nil)
 	api, writes := newOpenListFixture(t, base)
 	primary := &failingBackupPrimary{fakeDAVDrive: base, failList: true}
-	fs.mounts[0].drive = &backupDAVDrive{primary: primary, backup: api, root: "0", paths: map[string]string{"0": ""}, entries: map[string]davEntry{}}
+	fs.mounts[0].drive = &backupDAVDrive{primary: primary, backup: api, root: "0"}
 	fs.invalidate(fs.mounts[0])
 	for _, method := range []string{"PUT", "MOVE", "COPY", "DELETE", "MKCOL", "LOCK"} {
 		t.Run(method, func(t *testing.T) {
@@ -56,7 +56,7 @@ func TestReleaseOpenListHTTPFallbackPreservesSourceAndDestination(t *testing.T) 
 func TestReleaseOpenListNativeOverwriteKeepsNewTarget(t *testing.T) {
 	server, base, fs := testDAVService(t, true)
 	api, writes := newOpenListFixture(t, base)
-	fs.mounts[0].drive = &backupDAVDrive{primary: base, backup: api, root: "0", paths: map[string]string{"0": ""}, entries: map[string]davEntry{}}
+	fs.mounts[0].drive = &backupDAVDrive{primary: base, backup: api, root: "0"}
 	root := "/联通云盘-1/"
 	wantDAV(t, server.URL, "PUT", root+"source.txt", "new source", 201, nil)
 	wantDAV(t, server.URL, "PUT", root+"target.txt", "old target", 201, nil)

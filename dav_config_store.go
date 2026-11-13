@@ -38,6 +38,9 @@ func readDAVConfig(file string) (davSavedConfig, error) {
 	if err = dec.Decode(&cfg); err != nil {
 		return davSavedConfig{}, err
 	}
+	if err = validateSavedDAVMounts(cfg.Mounts); err != nil {
+		return davSavedConfig{}, err
+	}
 	return cfg, nil
 }
 

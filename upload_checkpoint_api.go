@@ -45,7 +45,7 @@ func readUploadCheckpoint(file string) (*uploadCheckpoint, error) {
 	if c.data.Version != 1 || c.data.Parts == nil || filepath.Base(file) != c.data.Key+".bin" {
 		return nil, os.ErrInvalid
 	}
-	c.restoreVersions()
+	c.restoreEntryMetadata()
 	return c, nil
 }
 

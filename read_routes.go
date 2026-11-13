@@ -178,9 +178,23 @@ type resolvedReadRoute struct {
 	until            time.Time
 	generation       uint64
 	failedGeneration uint64
+	retryAt          time.Time
+	failures         int
 }
 
-func (r *resolvedReadRoute) get(ctx context.Context) (readTarget, uint64, error) {
+// A retry deadline belongs to the route, so concurrent readers cannot each
+// refresh a failed address while another reader is backing off.
+type readRouteRetry struct {
+	at  time.Time
+	err error
+}
+
+var errReadRouteChanged = errors.New("读取地址已失效，重新选择通道")
+
+func (e *readRouteRetry) Error() string { return e.err.Error() }
+func (e *readRouteRetry) Unwrap() error { return e.err }
+
+func (r *resolvedReadRoute) get(ctx context.Context, retryDelay time.Duration) (readTarget, uint64, error) {
 	if err := r.mu.LockContext(ctx); err != nil {
 		return readTarget{}, 0, err
 	}
@@ -188,19 +202,49 @@ func (r *resolvedReadRoute) get(ctx context.Context) (readTarget, uint64, error)
 	if err := r.denials.stopped(); err != nil {
 		return readTarget{}, r.generation, err
 	}
+	if time.Now().Before(r.retryAt) {
+		return readTarget{}, r.generation, &readRouteRetry{at: r.retryAt, err: errors.New("读取通道等待重试")}
+	}
 	if r.target.URL != "" && time.Now().Before(r.until) {
 		return r.target, r.generation, nil
 	}
 	r.generation++
 	t, e := r.route.Resolve(ctx)
+	if err := ctx.Err(); err != nil {
+		return readTarget{}, r.generation, err
+	}
 	if e == nil {
 		e = validDAVURL(t.URL)
 	}
 	if e == nil {
 		r.target, r.until = t, time.Now().Add(30*time.Second)
+	} else {
+		// Publish failure before releasing the resolution lock. Waiting readers
+		// must observe its deadline instead of immediately resolving again.
+		e = r.failureLocked(r.generation, e, retryDelay)
 	}
 	return t, r.generation, e
 }
+
+// Acquiring a body slot may queue behind a request that invalidates this target.
+// Recheck the lease before issuing another request with the queued address.
+func (r *resolvedReadRoute) ready(ctx context.Context, generation uint64) error {
+	if err := r.mu.LockContext(ctx); err != nil {
+		return err
+	}
+	defer r.mu.Unlock()
+	if err := r.denials.stopped(); err != nil {
+		return err
+	}
+	if time.Now().Before(r.retryAt) {
+		return &readRouteRetry{at: r.retryAt, err: errors.New("读取通道等待重试")}
+	}
+	if generation != r.generation || r.target.URL == "" {
+		return errReadRouteChanged
+	}
+	return nil
+}
+
 func (r *resolvedReadRoute) invalidate(generation uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -213,25 +257,55 @@ func (r *resolvedReadRoute) invalidate(generation uint64) {
 
 // A batch of requests sharing one address counts as one failed refresh round.
 // Late responses may not invalidate or penalize a newer address.
-func (r *resolvedReadRoute) failure(generation uint64, err error) error {
+func (r *resolvedReadRoute) failure(generation uint64, err error, retryDelay time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.failureLocked(generation, err, retryDelay)
+}
+
+func (r *resolvedReadRoute) failureLocked(generation uint64, err error, retryDelay time.Duration) error {
+	if generation != r.generation {
+		return err
+	}
 	if terminal := r.denials.stopped(); terminal != nil {
 		return terminal
 	}
-	if generation != r.generation || r.failedGeneration == generation {
+	if r.failedGeneration != generation {
+		r.failedGeneration = generation
+		r.target, r.until = readTarget{}, time.Time{}
+		r.failures++
+		err = r.denials.failure(err)
+		if retryableTransfer(err) {
+			r.retryAt = time.Now().Add(transferRetryDelay(r.failures, retryDelay))
+		}
+	}
+	if !retryableTransfer(err) {
 		return err
 	}
-	r.failedGeneration = generation
-	r.target, r.until = readTarget{}, time.Time{}
-	return r.denials.failure(err)
+	// The same generation counts once, but a later response may impose a
+	// longer Retry-After. An older generation never extends this deadline.
+	if until := time.Now().Add(transferRetryAfter(err)); until.After(r.retryAt) {
+		r.retryAt = until
+	}
+	return &readRouteRetry{at: r.retryAt, err: err}
 }
 
 func (r *resolvedReadRoute) succeeded(generation uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if generation == r.generation {
+	if generation == r.generation && r.failedGeneration != generation {
 		r.denials.failure(nil)
+		r.retryAt = time.Time{}
+	}
+}
+
+// Headers establish permission and identity; only a complete body proves that
+// this route has recovered from repeated truncation or idle failures.
+func (r *resolvedReadRoute) completed(generation uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if generation == r.generation && r.failedGeneration != generation {
+		r.failures = 0
 	}
 }
 
@@ -239,6 +313,20 @@ type downloadSignature struct {
 	mu                              sync.Mutex
 	set                             bool
 	etag, modified, version, source string
+}
+
+func (s *downloadSignature) verifiable() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.version != "" || s.etag != "" || s.modified != ""
+}
+
+// Only the discarded capability probe may release an uncommitted signature.
+// A Seek never starts a new logical download session.
+func (s *downloadSignature) discardProbe() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.set, s.etag, s.modified, s.version, s.source = false, "", "", "", ""
 }
 
 func (s *downloadSignature) accept(route readRoute, h http.Header) error {

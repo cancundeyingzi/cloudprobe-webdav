@@ -45,6 +45,8 @@ type OriginalBridge struct {
 	done       chan struct{}
 	seq        atomic.Int64
 	lastErr    error
+	exited     bool
+	exitCode   int
 	stderr     *engineErrorTail
 }
 
@@ -133,11 +135,7 @@ func startOriginalBridge(ctx context.Context, sdk, bridgeFile, data string) (*Or
 				}
 			}
 		}
-		e := cmd.Wait()
-		b.mu.Lock()
-		b.lastErr = e
-		b.mu.Unlock()
-		close(b.done)
+		b.waitProcess()
 	}()
 	select {
 	case r := <-b.ready:
@@ -165,12 +163,26 @@ func startOriginalBridge(ctx context.Context, sdk, bridgeFile, data string) (*Or
 		return nil, engineProblem("timeout", "原版引擎在 25 秒内未报告就绪。", tail.Text())
 	}
 }
+
+// exec.Cmd.Wait owns ProcessState. Publish a separate diagnostic snapshot only
+// after Wait returns; stopping may already make Alive false before then.
+func (b *OriginalBridge) waitProcess() {
+	err := b.cmd.Wait()
+	b.mu.Lock()
+	b.lastErr = err
+	if b.cmd.ProcessState != nil {
+		b.exited, b.exitCode = true, b.cmd.ProcessState.ExitCode()
+	}
+	b.mu.Unlock()
+	close(b.done)
+}
+
 func (b *OriginalBridge) exitError() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	detail := "尚未取得进程退出码。"
-	if b.cmd != nil && b.cmd.ProcessState != nil {
-		detail = fmt.Sprintf("退出码：%d", b.cmd.ProcessState.ExitCode())
+	if b.exited {
+		detail = fmt.Sprintf("退出码：%d", b.exitCode)
 	}
 	if b.lastErr != nil {
 		detail += "\n进程错误：" + b.lastErr.Error()

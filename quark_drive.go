@@ -514,13 +514,19 @@ func (d *quarkDAVDrive) verifyMutation(ctx context.Context, parent, id, name str
 		if err != nil {
 			return &davMutationError{Phase: "变更后目录核验", Partial: true, Err: err}
 		}
+		if !removed {
+			entry, err := uniqueNamedEntry(entries, name)
+			if err != nil {
+				return &davMutationError{Phase: "变更后目录核验", Partial: true, Err: err}
+			}
+			if entry != nil && entry.ID == id {
+				return nil
+			}
+		}
 		found := false
 		for _, it := range entries {
 			if it.ID == id {
 				found = true
-				if !removed && it.Name == name {
-					return nil
-				}
 			}
 		}
 		if removed && !found {
@@ -538,36 +544,14 @@ func (d *quarkDAVDrive) Move(ctx context.Context, it davEntry, parent, name stri
 	if err := safeFilename(name); err != nil {
 		return err
 	}
-	changed := false
-	if name != it.Name {
-		_, err := d.mutate(ctx, "重命名", map[string]any{"fid": it.ID, "file_name": name}, map[string]any{"fid": it.ID, "file_name": name, "conflict_mode": "FAIL"}, "/file/rename", "/open/v1/file/rename", func(check context.Context, _ map[string]any) error {
-			if it.Parent == "" {
-				return errors.New("缺少原父目录，无法按 ID 核验改名")
-			}
-			return d.verifyMutation(check, it.Parent, it.ID, name, false)
-		})
-		if err != nil {
-			return err
-		}
-		changed = true
-	}
 	if parent != "" && parent != it.Parent {
-		_, err := d.mutate(ctx, "移动", map[string]any{"action_type": 1, "filelist": []string{it.ID}, "exclude_fids": []string{}, "to_pdir_fid": parent}, map[string]any{"action_type": 1, "fid_list": []string{it.ID}, "to_pdir_fid": parent}, "/file/move", "/open/v1/file/move", func(check context.Context, _ map[string]any) error {
-			return d.verifyMutation(check, parent, it.ID, name, false)
-		})
-		if err != nil {
-			if changed {
-				return &davMutationError{Phase: "改名后的移动", Partial: true, Err: err}
-			}
-			return err
+		if name != it.Name {
+			return d.moveRenamed(ctx, it, parent, name)
 		}
+		return d.moveObject(ctx, it, parent)
 	}
-	expectedParent := parent
-	if expectedParent == "" {
-		expectedParent = it.Parent
-	}
-	if expectedParent != "" {
-		return d.verifyMutation(ctx, expectedParent, it.ID, name, false)
+	if name != it.Name {
+		return d.renameObject(ctx, it, name)
 	}
 	return nil
 }

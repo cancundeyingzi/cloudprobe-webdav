@@ -82,34 +82,34 @@ func TestParallelDownloadRefreshesExpiredAddressOncePerRound(t *testing.T) {
 func TestDownloadRouteIgnoresOldResponsesAndCountsRefreshRounds(t *testing.T) {
 	route := &resolvedReadRoute{route: fixtureRoute("fixture", "https://example.invalid/file", "")}
 	ctx := context.Background()
-	_, oldGeneration, err := route.get(ctx)
+	_, oldGeneration, err := route.get(ctx, time.Nanosecond)
 	if err != nil {
 		t.Fatal(err)
 	}
 	denied := &upstreamHTTPError{code: http.StatusForbidden}
 	for index := 0; index < 16; index++ {
 		var terminal *persistentForbiddenError
-		if errors.As(route.failure(oldGeneration, denied), &terminal) {
+		if errors.As(route.failure(oldGeneration, denied, time.Nanosecond), &terminal) {
 			t.Fatal("one address exhausted the refresh budget")
 		}
 	}
-	_, generation, err := route.get(ctx)
+	_, generation, err := readRouteAfterBackoff(ctx, route)
 	if err != nil {
 		t.Fatal(err)
 	}
 	route.succeeded(generation)
-	route.failure(oldGeneration, denied)
+	route.failure(oldGeneration, denied, time.Nanosecond)
 	route.invalidate(oldGeneration)
-	_, current, err := route.get(ctx)
+	_, current, err := route.get(ctx, time.Nanosecond)
 	if err != nil || current != generation {
 		t.Fatal("old response invalidated the newer target", current, generation, err)
 	}
 	for round := 1; round <= 5; round++ {
-		_, generation, err = route.get(ctx)
+		_, generation, err = readRouteAfterBackoff(ctx, route)
 		if err != nil {
 			t.Fatal("refresh ended early", round, err)
 		}
-		failure := route.failure(generation, denied)
+		failure := route.failure(generation, denied, time.Nanosecond)
 		route.succeeded(oldGeneration) // An old success must not clear current denials.
 		var terminal *persistentForbiddenError
 		if errors.As(failure, &terminal) != (round == 5) {
@@ -126,13 +126,13 @@ func TestCanceledDownloadDoesNotWaitForAnotherAddressResolution(t *testing.T) {
 		return readTarget{URL: "https://example.invalid/file"}, nil
 	}}}
 	resolved := make(chan struct{})
-	go func() { defer close(resolved); route.get(context.Background()) }()
+	go func() { defer close(resolved); route.get(context.Background(), time.Nanosecond) }()
 	defer func() { close(release); <-resolved }()
 	<-entered
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan error, 1)
-	go func() { _, _, err := route.get(ctx); done <- err }()
+	go func() { _, _, err := route.get(ctx, time.Nanosecond); done <- err }()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {

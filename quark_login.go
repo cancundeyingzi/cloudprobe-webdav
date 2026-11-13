@@ -19,6 +19,7 @@ import (
 
 type quarkLoginFlow struct {
 	completed                               bool
+	credentialRevision                      uint64
 	method, stage, err, image, authorizeURL string
 	token, pageCode, wxURL, wxUUID, target  string
 	credentials                             quarkCredentials
@@ -34,8 +35,18 @@ func (m *quarkManager) Start(method, target string) error {
 	if method != "quark" && method != "wechat" && method != "open" && method != "phone" {
 		return errors.New("夸克登录方式无效")
 	}
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return context.Canceled
+	}
 	m.Stop()
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return context.Canceled
+	}
 	if m.loadError != "" {
 		m.mu.Unlock()
 		return errors.New(m.loadError)
@@ -57,26 +68,43 @@ func (m *quarkManager) Start(method, target string) error {
 	m.mu.Unlock()
 	go func() {
 		defer cancel()
-		err := m.runLogin(ctx, generation, flow)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.generation != generation {
-			return
-		}
-		m.cancel = nil
-		if err != nil {
-			flow.stage = "夸克登录未完成"
-			flow.err = m.app.redactDAV(err.Error())
-			flow.image = ""
-			flow.authorizeURL = ""
-		} else {
-			flow.stage = "夸克登录成功，授权已保存"
-			flow.image = ""
-			flow.authorizeURL = ""
-		}
+		m.finishLogin(generation, flow, m.runLogin(ctx, generation, flow))
 	}()
 	return nil
 }
+
+func (m *quarkManager) finishLogin(generation uint64, flow *quarkLoginFlow, err error) {
+	m.mu.Lock()
+	current := m.generation == generation
+	redact := err != nil && !flow.completed
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	message := ""
+	if redact {
+		// Redaction takes app.mu, which can wait on unrelated account I/O.
+		// Keep manager.mu available to Stop and Close throughout that wait.
+		message = m.app.redactDAV(err.Error())
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.generation != generation {
+		return
+	}
+	m.cancel = nil
+	flow.image, flow.authorizeURL = "", ""
+	if flow.completed {
+		// Status derives pending/saved from this login's revision. Do not
+		// retain a transient disk error after the background retry succeeds.
+		flow.stage, flow.err = "夸克登录成功，授权已保存", ""
+	} else if err != nil {
+		flow.stage, flow.err = "夸克登录未完成", message
+	} else {
+		flow.stage = "夸克登录成功，授权已保存"
+	}
+}
+
 func (m *quarkManager) runLogin(ctx context.Context, generation uint64, f *quarkLoginFlow) error {
 	if f.method == "phone" {
 		return m.runPhoneLogin(ctx, generation, f)

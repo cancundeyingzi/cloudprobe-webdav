@@ -199,7 +199,7 @@ func TestMaintenanceConfirmedRejectionDoesNotUseOpenListForWrites(t *testing.T) 
 	}))
 	defer api.Close()
 	c, _ := newOpenListClient(openListInput{Enabled: true, Address: api.URL, Root: "/mount"})
-	b := &backupDAVDrive{primary: d, backup: c, root: "0", paths: map[string]string{"0": "", "f": "old.txt", "dest": "destination"}, entries: map[string]davEntry{}}
+	b := &backupDAVDrive{primary: d, backup: c, root: "0"}
 	if e := b.Move(context.Background(), davEntry{Item: Item{ID: "f", Name: "old.txt"}}, "dest", "new.txt"); e == nil {
 		t.Fatal("native rejection became success through unsafe OpenList fallback")
 	}

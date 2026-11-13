@@ -52,6 +52,8 @@ go build -mod=vendor -trimpath -o CloudProbe.exe .
 
 条件读取、并发地址刷新、业务错误分类、退出取消和目录缓存回收的后续修复见 [代码复查与修复记录](docs/代码复查修复-2026-11-13.md)。
 
+多段读取一致性、夸克授权保存、挂载配置合并、跨目录改名及 OpenList 路径索引的进一步修复见 [架构复查与修复记录](docs/架构复查修复-2026-11-13.md)。
+
 GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号安全，原版 SDK 二进制不放在 GitHub 仓库中。取得可用 SDK 后生成桥接组件：
 
 ```powershell
@@ -65,7 +67,7 @@ GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号�
 Windows PowerShell 7 下运行：
 
 ```powershell
-.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.8
+.\scripts\package-windows.ps1 -SdkPath C:\path\to\authorized-sdk -OutputRoot C:\path\to\dist -ExpectedTag v1.12.10
 ```
 
 脚本从源码编译 EXE 与 Bridge，按明确组件清单装配 SDK，使用默认 `data/` 验证真实引擎启动后清理测试资料并打包。输出 ZIP 不包含账号资料；Windows 仍需 .NET 8 x64 运行时。

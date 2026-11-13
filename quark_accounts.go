@@ -22,16 +22,25 @@ type quarkSavedAccounts struct {
 type quarkLoginGenerationKey struct{}
 
 type quarkManager struct {
-	commitMu             sync.Mutex
-	mu                   sync.Mutex
-	saveMu               sync.Mutex
-	app                  *guiApp
-	clients              map[string]*quarkClient
-	deviceID, deviceName string
-	loadError            string
-	flow                 *quarkLoginFlow
-	generation           uint64
-	cancel               context.CancelFunc
+	commitMu                contextMutex
+	mu                      sync.Mutex
+	saveMu                  contextMutex
+	app                     *guiApp
+	clients                 map[string]*quarkClient
+	deviceID, deviceName    string
+	loadError               string
+	flow                    *quarkLoginFlow
+	generation              uint64
+	cancel                  context.CancelFunc
+	revision, savedRevision uint64
+	saveError               string
+	retryRunning            bool
+	credentialCtx           context.Context
+	cancelCredentials       context.CancelFunc
+	retryDelay              time.Duration // Optional retry interval for deterministic fixtures.
+	closed                  bool
+	closeDone               chan struct{}
+	closeError              error
 	// Login endpoints are replaceable only by package tests.
 	authBase       string
 	validateClient func(quarkCredentials) *quarkClient
@@ -41,6 +50,7 @@ type quarkManager struct {
 
 func newQuarkManager(g *guiApp) *quarkManager {
 	m := &quarkManager{app: g, clients: map[string]*quarkClient{}, deviceID: randomKey()[:26], deviceName: "CloudProbe-Windows", authBase: "https://uop.quark.cn/cas/ajax"}
+	m.credentialCtx, m.cancelCredentials = context.WithCancel(context.Background())
 	raw, err := os.ReadFile(filepath.Join(g.data, "quark-accounts.bin"))
 	if err == nil {
 		var saved quarkSavedAccounts
@@ -71,7 +81,8 @@ func newQuarkManager(g *guiApp) *quarkManager {
 }
 func quarkAccountKey(uid string) string { return "quark-" + davIdentityHash("quark", uid) }
 func (m *quarkManager) makeClient(c quarkCredentials) *quarkClient {
-	q := newQuarkClient(c, func(c quarkCredentials) error { return m.persist(c) })
+	q := newQuarkClient(c, nil)
+	q.owner = m
 	q.redact = m.app.redactDAV
 	return q
 }
@@ -89,23 +100,6 @@ func (m *quarkManager) rememberSecrets(c quarkCredentials) {
 		m.app.rememberSecretsLocked(value)
 	}
 	m.app.mu.Unlock()
-}
-func (m *quarkManager) persist(update quarkCredentials) error {
-	m.saveMu.Lock()
-	defer m.saveMu.Unlock()
-	m.rememberSecrets(update)
-	m.mu.Lock()
-	if m.loadError != "" {
-		m.mu.Unlock()
-		return errors.New(m.loadError)
-	}
-	saved := quarkSavedAccounts{DeviceID: m.deviceID, DeviceName: m.deviceName}
-	for _, q := range m.clients {
-		c := q.snapshot()
-		saved.Accounts = append(saved.Accounts, c)
-	}
-	m.mu.Unlock()
-	return m.writeSaved(saved)
 }
 
 // Callers hold saveMu; lifecycle writers also hold commitMu until publication.
@@ -224,16 +218,22 @@ func (m *quarkManager) accept(ctx context.Context, c quarkCredentials, target st
 	return m.commitCredential(ctx, c, target)
 }
 func (m *quarkManager) commitCredential(ctx context.Context, c quarkCredentials, target string) error {
-	m.commitMu.Lock()
+	ctx, finish := m.credentialOperationContext(ctx)
+	defer finish()
+	if err := m.commitMu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer m.commitMu.Unlock()
-	m.saveMu.Lock()
+	if err := m.saveMu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer m.saveMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	m.mu.Lock()
 	generation, tagged := ctx.Value(quarkLoginGenerationKey{}).(uint64)
-	if tagged && generation != m.generation {
+	if m.closed || ctx.Err() != nil || tagged && generation != m.generation {
 		m.mu.Unlock()
 		return context.Canceled
 	}
@@ -251,65 +251,89 @@ func (m *quarkManager) commitCredential(ctx context.Context, c quarkCredentials,
 		}
 		key = target
 	}
-	if old := m.clients[key]; old != nil {
-		previous := old.snapshot()
-		if len(c.Cookies) > 0 {
-			previous.Cookies = c.Cookies
-			previous.Name = c.Name
-			if c.DeviceID != "" {
-				previous.DeviceID = c.DeviceID
-			}
-			c = previous
-		} else {
-			previous.AccessToken = c.AccessToken
-			previous.RefreshToken = c.RefreshToken
-			previous.OpenUID = c.OpenUID
-			previous.OpenDeviceID = c.OpenDeviceID
-			previous.OpenVerified = c.OpenVerified
-			c = previous
-		}
+	channel := quarkOAuthChannel
+	if len(c.Cookies) > 0 {
+		channel = quarkCookieChannel
 	}
-	saved := quarkSavedAccounts{DeviceID: m.deviceID, DeviceName: m.deviceName, Accounts: []quarkCredentials{c}}
+	candidate := cloneQuarkCredentials(c)
+	existing := m.clients[key]
+	if existing != nil {
+		candidate = existing.snapshot()
+		mergeQuarkCredential(&candidate, c, channel)
+	}
+	saved := quarkSavedAccounts{DeviceID: m.deviceID, DeviceName: m.deviceName, Accounts: []quarkCredentials{candidate}}
 	for id, client := range m.clients {
 		if id != key {
 			saved.Accounts = append(saved.Accounts, client.snapshot())
 		}
 	}
+	revision := m.revision
 	m.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Cancel/replace is serialized with this commit. Failed vault writes do
-	// not make credentials visible to other persistence callbacks or the UI.
+	// A login is published only after its first successful encrypted write.
+	// Network updates remain free to advance their own channel while it saves.
 	if err := m.writeSaved(saved); err != nil {
 		return err
 	}
 	m.mu.Lock()
-	if existing := m.clients[key]; existing != nil {
-		existing.mu.Lock()
-		existing.credentials = c
-		existing.mu.Unlock()
+	if m.closed || ctx.Err() != nil || tagged && generation != m.generation {
+		// The staged disk image must be replaced by the still-current state.
+		m.revision++
+		m.startCredentialRetryLocked()
+		m.mu.Unlock()
+		return context.Canceled
+	}
+	if existing != nil {
+		// A successful login replaces the previous session, including any
+		// responses it produced during the staged write. manager.mu keeps
+		// this version capture and publication atomic against those updates.
+		_, version := existing.snapshotChannel(channel)
+		existing.applyCredential(channel, version, func(dst *quarkCredentials) bool {
+			mergeQuarkCredential(dst, c, channel)
+			return true
+		})
 	} else {
-		m.clients[key] = m.makeClient(c)
+		m.clients[key] = m.makeClient(candidate)
+	}
+	m.revision++
+	if m.revision == revision+1 {
+		m.savedRevision = m.revision
+		m.saveError = ""
 	}
 	if tagged && m.flow != nil {
 		m.flow.completed = true
+		m.flow.credentialRevision = m.revision
 		m.flow.stage = "夸克登录成功，授权已保存"
+		m.flow.err = ""
 		m.flow.image = ""
 		m.flow.authorizeURL = ""
 	}
 	m.mu.Unlock()
-	m.rememberSecrets(c)
+	m.rememberSecrets(candidate)
 	m.publishAccounts()
+	// Re-snapshot after publication: this includes updates that happened
+	// during the staged write without ever restoring an older other channel.
+	if err := m.flushCredentialsLocked(ctx, false); err != nil {
+		return err
+	}
 	m.app.event("夸克账号授权已核验并加密保存")
 	return nil
 }
-func (m *quarkManager) removeAccount(key string) error {
-	m.commitMu.Lock()
+func (m *quarkManager) removeAccount(ctx context.Context, key string) error {
+	ctx, finish := m.credentialOperationContext(ctx)
+	defer finish()
+	if err := m.commitMu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer m.commitMu.Unlock()
-	m.saveMu.Lock()
+	if err := m.saveMu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer m.saveMu.Unlock()
 	m.mu.Lock()
+	if m.closed || ctx.Err() != nil {
+		m.mu.Unlock()
+		return context.Canceled
+	}
 	if m.clients[key] == nil {
 		m.mu.Unlock()
 		return errors.New("夸克账号不存在")
@@ -325,15 +349,27 @@ func (m *quarkManager) removeAccount(key string) error {
 			saved.Accounts = append(saved.Accounts, q.snapshot())
 		}
 	}
+	revision := m.revision
 	m.mu.Unlock()
 	if err := m.writeSaved(saved); err != nil {
 		return err
 	}
 	m.mu.Lock()
+	if m.closed || ctx.Err() != nil {
+		m.revision++
+		m.startCredentialRetryLocked()
+		m.mu.Unlock()
+		return context.Canceled
+	}
 	delete(m.clients, key)
+	m.revision++
+	if m.revision == revision+1 {
+		m.savedRevision = m.revision
+		m.saveError = ""
+	}
 	m.mu.Unlock()
 	m.publishAccounts()
-	return nil
+	return m.flushCredentialsLocked(ctx, false)
 }
 func (m *quarkManager) Status() map[string]any {
 	if m == nil {
@@ -341,7 +377,7 @@ func (m *quarkManager) Status() map[string]any {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := map[string]any{"running": m.cancel != nil, "error": m.loadError, "stage": "尚未发起夸克登录"}
+	out := map[string]any{"running": m.cancel != nil, "error": m.loadError, "stage": "尚未发起夸克登录", "credential_save_pending": m.revision != m.savedRevision, "credential_save_error": m.saveError}
 	if m.flow != nil {
 		out["stage"] = m.flow.stage
 		out["error"] = m.flow.err
@@ -350,6 +386,12 @@ func (m *quarkManager) Status() map[string]any {
 		out["method"] = m.flow.method
 		out["completed"] = m.flow.completed
 		out["expires"] = m.flow.expires.Unix()
+		if m.flow.completed {
+			out["stage"], out["error"] = "夸克登录成功，授权已保存", ""
+			if m.flow.credentialRevision > m.savedRevision {
+				out["stage"], out["error"] = "夸克登录成功，新凭据等待保存", m.saveError
+			}
+		}
 	}
 	return out
 }
@@ -357,8 +399,6 @@ func (m *quarkManager) Stop() {
 	if m == nil {
 		return
 	}
-	m.commitMu.Lock()
-	defer m.commitMu.Unlock()
 	m.mu.Lock()
 	c := m.cancel
 	m.cancel = nil
@@ -452,7 +492,7 @@ func (g *guiApp) quarkAPI(w http.ResponseWriter, r *http.Request) {
 		err = g.quark.accept(r.Context(), quarkCredentials{Cookies: cookies, DeviceID: device, DeviceName: name}, input.Account)
 	case "remove":
 		g.quark.Stop()
-		err = g.quark.removeAccount(input.Account)
+		err = g.quark.removeAccount(r.Context(), input.Account)
 	case "quota":
 		var q *quarkClient
 		q, err = g.quark.client(input.Account)

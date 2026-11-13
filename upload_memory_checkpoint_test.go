@@ -72,8 +72,13 @@ func assertMemoryMetadataOnly(t *testing.T, spool string, body []byte) {
 }
 
 func TestMemoryCheckpointFullPUTReplayAndChangedContent(t *testing.T) {
-	for _, changed := range []bool{false, true} {
-		t.Run(strconv.FormatBool(changed), func(t *testing.T) {
+	for _, test := range []struct{ changed, legacy bool }{{}, {changed: true}, {legacy: true}} {
+		changed := test.changed
+		name := strconv.FormatBool(changed)
+		if test.legacy {
+			name = "legacy-envelope"
+		}
+		t.Run(name, func(t *testing.T) {
 			fixture, drive := newQuarkFixture(t)
 			fixture.add("0", "file.bin", []byte("original"), false)
 			spool := t.TempDir()
@@ -87,6 +92,28 @@ func TestMemoryCheckpointFullPUTReplayAndChangedContent(t *testing.T) {
 				t.Fatal("expected injected interruption")
 			}
 			server.Close()
+			if test.legacy {
+				files, err := filepath.Glob(filepath.Join(spool, "resume", "*.bin"))
+				if err != nil || len(files) != 1 {
+					t.Fatal("expected one interrupted checkpoint", files, err)
+				}
+				raw, err := os.ReadFile(files[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				plain, err := unprotectLocal(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cp := &uploadCheckpoint{file: files[0]}
+				if err := json.Unmarshal(plain, &cp.data); err != nil {
+					t.Fatal(err)
+				}
+				cp.data.Account, cp.data.Parent, cp.data.TargetName = "", "", ""
+				if err := cp.saveLocked(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			assertMemoryMetadataOnly(t, spool, body)
 			if fs.transfers.memory.status()["used_bytes"].(int64) != 0 {
 				t.Fatal("failed upload leaked buffers")

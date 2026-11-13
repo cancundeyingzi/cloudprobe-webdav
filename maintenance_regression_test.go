@@ -173,7 +173,7 @@ func TestFixPartialNativeMoveMustNotReplayThroughOpenList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &backupDAVDrive{primary: d, backup: c, root: "0", paths: map[string]string{"0": "", "f": "old.txt", "dest": "destination"}, entries: map[string]davEntry{}}
+	b := &backupDAVDrive{primary: d, backup: c, root: "0"}
 	err = b.Move(context.Background(), davEntry{Item: Item{ID: "f", Name: "old.txt"}}, "dest", "new.txt")
 	if renames.Load() != 1 || moves.Load() != 1 || err == nil {
 		t.Fatal("partial execution setup failed", renames.Load(), moves.Load(), err)

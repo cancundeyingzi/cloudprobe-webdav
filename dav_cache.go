@@ -66,6 +66,9 @@ func directoryCacheBytes(entries []davEntry) int {
 	size := len(entries) * int(unsafe.Sizeof(davEntry{}))
 	for _, e := range entries {
 		size += len(e.ID) + len(e.FID) + len(e.Name) + len(e.Suffix) + len(e.Kind) + len(e.SampleParserDrop) + len(e.FilterReason) + len(e.Parent) + len(e.ContentVersion)
+		if e.backupPath != nil {
+			size += backupPathNodeBytes(e.backupPath)
+		}
 	}
 	return size
 }

@@ -639,7 +639,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if e == nil && report.Complete {
 			if drive, _, driveErr := g.guiReadDrive(input.Account, cl); driveErr == nil {
 				if backup, ok := drive.(*backupDAVDrive); ok {
-					backup.remember(report.Directory, mobileDAVEntries(report.Items))
+					backup.rememberListing(report.Directory, mobileDAVEntries(report.Items))
 				}
 			}
 			snapshotID, e = g.storeBrowseSnapshot(input.Account, report.Directory, report.Items, nativeEntries)
@@ -756,7 +756,7 @@ func (g *guiApp) export(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-func guiCommand(parent context.Context, args []string, w io.Writer) (int, error) {
+func guiCommand(parent context.Context, args []string, w io.Writer) (code int, commandErr error) {
 	exe, e := os.Executable()
 	if e != nil {
 		return 1, e
@@ -828,7 +828,15 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	}
 	app.restoreCloudAccounts()
 	app.quark = newQuarkManager(app)
-	defer app.quark.Stop()
+	defer func() {
+		finalSave, cancelSave := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelSave()
+		if err := app.quark.Close(finalSave); err != nil {
+			failure := errors.New("夸克授权退出保存未完成：" + app.redactDAV(err.Error()))
+			app.event(failure.Error())
+			code, commandErr = 1, errors.Join(commandErr, failure)
+		}
+	}()
 	app.dav = newDAVManager(app)
 	app.dav.AutoStart(ctx)
 	app.webLogin = &wopanWebLogin{app: app, stage: "未开始"}

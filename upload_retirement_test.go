@@ -42,7 +42,7 @@ func TestRetirementCannotUseOpenListFallbackAsAbsenceEvidence(t *testing.T) {
 	backup, _ := newOpenListFixture(t, newFakeDAV(t))
 	var calls atomic.Int64
 	backup.client = &http.Client{Transport: protocolRoundTripper(func(*http.Request) (*http.Response, error) { calls.Add(1); return nil, errors.New("fallback invoked") })}
-	p.fs.mounts[0].drive = &backupDAVDrive{primary: retirementListFailure{p.drive}, backup: backup, root: "0", paths: map[string]string{"0": ""}, entries: map[string]davEntry{}}
+	p.fs.mounts[0].drive = &backupDAVDrive{primary: retirementListFailure{p.drive}, backup: backup, root: "0"}
 	if w := lifecycleRequest(p.g, "reset", p.cp.data.Key); w.Code < 400 {
 		t.Fatal("native failure accepted")
 	}

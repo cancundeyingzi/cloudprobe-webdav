@@ -193,7 +193,6 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 			release()
 			return nil, nil, errors.New("续传记录校验失败，已保留原文件")
 		}
-		c.restoreVersions()
 		if c.data.Account != "" && (c.data.Account != m.Identity || c.data.Parent != d.node.parent || c.data.TargetName != d.node.entry.Name) {
 			release()
 			return nil, nil, errors.New("续传任务资源身份不一致，保留记录")
@@ -202,6 +201,7 @@ func (d *davFile) openCheckpointFor(signature string, size int64, mode string) (
 		c.data.Parent = d.node.parent
 		c.data.TargetName = d.node.entry.Name
 		c.data.Target = d.name
+		c.restoreEntryMetadata()
 		if mode == "memory" && (c.data.Mode != "memory" || c.data.Hashes == nil) {
 			release()
 			return nil, nil, errors.New("内存续传记录缺少分片指纹，拒绝复用")
@@ -414,12 +414,16 @@ func (d *davFile) uploadWithCheckpoint(c *uploadCheckpoint) (davEntry, error) {
 	return entry, err
 }
 
-func (c *uploadCheckpoint) restoreVersions() {
+// Entry parent and version are stored once in the checkpoint envelope rather
+// than inside davEntry's JSON. Rebuild both before using recovered mutations.
+func (c *uploadCheckpoint) restoreEntryMetadata() {
 	if c.data.Original != nil {
 		c.data.Original.ContentVersion = c.data.OriginalVersion
+		c.data.Original.Parent = c.data.Parent
 	}
 	if c.data.Uploaded != nil {
 		c.data.Uploaded.ContentVersion = c.data.UploadedVersion
+		c.data.Uploaded.Parent = c.data.Parent
 	}
 }
 func sameCheckpointObject(a, b davEntry) bool {

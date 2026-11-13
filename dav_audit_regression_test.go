@@ -272,7 +272,7 @@ func TestDAVBackupRecoveryNeverUsesFallbackAbsence(t *testing.T) {
 	if err := base.Move(context.Background(), original, "", "CloudProbe-backup-test.txt"); err != nil {
 		t.Fatal(err)
 	}
-	mount := &davMount{Alias: "test", Root: "0", Writable: true, drive: &backupDAVDrive{primary: &backupFaultDrive{fakeDAVDrive: base, mode: "unreadable", backedUp: true}, backup: backup}}
+	mount := &davMount{Alias: "test", Root: "0", Writable: true, drive: &backupDAVDrive{primary: &backupFaultDrive{fakeDAVDrive: base, mode: "unreadable", backedUp: true}, backup: backup, root: "0"}}
 	state := &davRequestState{backups: []davBackup{{mount: mount, entry: original, parent: "0", target: "/test/target.txt", backupName: "CloudProbe-backup-test.txt"}}}
 	fs := &davFS{mounts: []*davMount{mount}}
 	err := fs.finishBackups(context.WithValue(context.Background(), davRequestKey{}, state), state, false)

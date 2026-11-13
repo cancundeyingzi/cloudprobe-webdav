@@ -92,26 +92,3 @@ func davWriteCheckFailure(ctx context.Context, name string, err error) *davStatu
 	}
 	return failure
 }
-
-func validateDAVMountResources(mounts []davMountInput, accounts map[string]guiAccount) error {
-	type selected struct {
-		alias    string
-		writable bool
-	}
-	seen := map[string]selected{}
-	for _, m := range mounts {
-		a, ok := accounts[m.Account]
-		if !ok {
-			return fmt.Errorf("所选账号已变化：%s", m.Alias)
-		}
-		key := davIdentity(a)
-		if key == "" {
-			return fmt.Errorf("挂载 %s 的账号缺少稳定身份标识，请重新读取账号", m.Alias)
-		}
-		if previous, ok := seen[key]; ok && (previous.writable || m.Writable) {
-			return fmt.Errorf("挂载 %s 与 %s 属于同账号；存在可写挂载时，该账号仅允许一个挂载。多个挂载必须全部只读，以免重叠目录绕过文件锁", previous.alias, m.Alias)
-		}
-		seen[key] = selected{m.Alias, m.Writable}
-	}
-	return nil
-}

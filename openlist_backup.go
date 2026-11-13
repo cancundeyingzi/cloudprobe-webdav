@@ -15,7 +15,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -238,77 +237,37 @@ type backupDAVDrive struct {
 	primary davDrive
 	backup  *openListClient
 	root    string
-	mu      sync.Mutex
-	paths   map[string]string
-	entries map[string]davEntry
+	index   backupPathIndex
 }
 
-func (b *backupDAVDrive) relative(id string) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	p, ok := b.paths[id]
-	if !ok {
-		return "", errors.New("OpenList 备用路径尚未建立，不能猜测云盘 ID 对应目录")
-	}
-	return p, nil
-}
-func (b *backupDAVDrive) remember(parent string, entries []davEntry) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	rel, ok := b.paths[parent]
-	if !ok {
-		return
-	}
-	for _, it := range entries {
-		b.paths[it.ID] = path.Join(rel, it.Name)
-		b.entries[it.ID] = it
-	}
-}
-func (b *backupDAVDrive) moved(it davEntry, parent, name string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	old, ok := b.paths[it.ID]
-	if !ok {
-		return
-	}
-	base := path.Dir(old)
-	if parent != "" {
-		if dst, ok := b.paths[parent]; ok {
-			base = dst
-		}
-	}
-	next := path.Join(base, name)
-	if next == "." {
-		next = ""
-	}
-	for id, rel := range b.paths {
-		if rel == old {
-			b.paths[id] = next
-		} else if strings.HasPrefix(rel, old+"/") {
-			b.paths[id] = next + strings.TrimPrefix(rel, old)
-		}
-	}
-}
-func (b *backupDAVDrive) listBackup(ctx context.Context, parent string) ([]davEntry, error) {
-	rel, e := b.relative(parent)
+func (b *backupDAVDrive) listBackup(ctx context.Context, parent string, ticket backupListingTicket) ([]davEntry, error) {
+	location, e := b.location(ctx, parent)
 	if e != nil {
 		return nil, e
 	}
 	started := time.Now()
-	items, e := b.backup.listing(ctx, rel)
+	items, e := b.backup.listing(ctx, location.relative)
 	logList(ctx, "OpenList 服务", "/api/fs/list", started, items, e)
 	if e == nil {
-		b.remember(parent, items)
+		e = b.recordLocations(location, items, true, ticket)
+	}
+	if e != nil {
+		return nil, e
 	}
 	return items, e
 }
 func (b *backupDAVDrive) List(ctx context.Context, parent string) ([]davEntry, error) {
+	ticket := b.beginListing(parent)
+	defer b.finishListing(ticket)
 	if strings.HasPrefix(parent, "openlist:") {
-		return b.listBackup(ctx, parent)
+		return b.listBackup(ctx, parent, ticket)
 	}
+	location, _ := b.location(ctx, parent)
 	items, e := b.primary.List(ctx, parent)
 	if e == nil {
-		b.remember(parent, items)
+		if err := b.recordLocations(location, items, true, ticket); err != nil {
+			return nil, err
+		}
 		return items, nil
 	}
 	if ctx.Err() != nil {
@@ -321,30 +280,35 @@ func (b *backupDAVDrive) List(ctx context.Context, parent string) ([]davEntry, e
 		}
 	}
 	logFallback(ctx, "内置目录接口", "OpenList 服务", e)
-	fallback, other := b.listBackup(ctx, parent)
+	fallback, other := b.listBackup(ctx, parent, ticket)
 	if other != nil {
 		return nil, fmt.Errorf("内置：%v；OpenList：%w", e, other)
 	}
 	return fallback, nil
 }
 func (b *backupDAVDrive) ReadRoutes(ctx context.Context, it davEntry) []readRoute {
+	location, locationErr := b.readLocation(ctx, it)
 	var routes []readRoute
 	if !strings.HasPrefix(it.ID, "openlist:") {
 		routes = routesFor(ctx, b.primary, it)
 	}
 	routes = append(routes, readRoute{Name: "OpenList 服务", Resolve: func(c context.Context) (readTarget, error) {
-		rel, e := b.relative(it.ID)
-		if e != nil {
+		if locationErr != nil {
+			return readTarget{}, locationErr
+		}
+		if e := location.usable(); e != nil {
 			return readTarget{}, e
 		}
-		return b.backup.link(c, rel, it.Size)
+		return b.backup.link(c, location.relative, it.Size)
 	}})
 	routes = append(routes, readRoute{Name: "OpenList 代理正文", Resolve: func(c context.Context) (readTarget, error) {
-		rel, e := b.relative(it.ID)
-		if e != nil {
+		if locationErr != nil {
+			return readTarget{}, locationErr
+		}
+		if e := location.usable(); e != nil {
 			return readTarget{}, e
 		}
-		return b.backup.proxyLink(c, rel, it.Size)
+		return b.backup.proxyLink(c, location.relative, it.Size)
 	}})
 	return routes
 }
@@ -388,15 +352,19 @@ func (b *backupDAVDrive) Remove(ctx context.Context, it davEntry) error {
 	if strings.HasPrefix(it.ID, "openlist:") {
 		return &davNotExecuted{errOpenListReadOnly}
 	}
-	return b.primary.Remove(ctx, it)
+	err := b.primary.Remove(ctx, it)
+	if err == nil || !confirmedMutationRejection(err) {
+		b.forget(it)
+	}
+	return err
 }
 func (b *backupDAVDrive) Move(ctx context.Context, it davEntry, parent, name string) error {
 	if strings.HasPrefix(it.ID, "openlist:") || strings.HasPrefix(parent, "openlist:") {
 		return &davNotExecuted{errOpenListReadOnly}
 	}
 	err := b.primary.Move(ctx, it, parent, name)
-	if err == nil {
-		b.moved(it, parent, name)
+	if err == nil || !confirmedMutationRejection(err) {
+		b.forget(it)
 	}
 	return err
 }

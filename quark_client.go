@@ -62,6 +62,9 @@ type quarkClient struct {
 	mu          sync.Mutex
 	refresh     contextMutex
 	credentials quarkCredentials
+	versions    [2]uint64
+	owner       *quarkManager
+	callbackMu  sync.Mutex
 	metadata    *http.Client
 	bodies      *http.Client
 	endpoints   map[quarkRoute]string
@@ -72,7 +75,7 @@ type quarkClient struct {
 }
 
 func newQuarkClient(c quarkCredentials, save func(quarkCredentials) error) *quarkClient {
-	q := &quarkClient{credentials: c, save: save, endpoints: map[quarkRoute]string{
+	q := &quarkClient{credentials: cloneQuarkCredentials(c), save: save, endpoints: map[quarkRoute]string{
 		quarkDesktop: "https://drive-pc.quark.cn/1/clouddrive", quarkWeb: "https://drive.quark.cn/1/clouddrive", quarkOpen: "https://open-api-drive.quark.cn"}, pan: "https://pan.quark.cn"}
 	q.metadata = providerMetadataClient(30 * time.Second)
 	q.metadata.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -93,12 +96,7 @@ func newQuarkClient(c quarkCredentials, save func(quarkCredentials) error) *quar
 func (q *quarkClient) snapshot() quarkCredentials {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	c := q.credentials
-	c.Cookies = map[string]string{}
-	for k, v := range q.credentials.Cookies {
-		c.Cookies[k] = v
-	}
-	return c
+	return cloneQuarkCredentials(q.credentials)
 }
 func quarkCookieHeader(c map[string]string) string {
 	keys := make([]string, 0, len(c))
@@ -134,35 +132,36 @@ func mapValues(m map[string]string) []string {
 	return v
 }
 func (q *quarkClient) ingest(cookies []*http.Cookie) error {
+	_, version := q.snapshotChannel(quarkCookieChannel)
+	return q.ingestVersion(context.Background(), cookies, version)
+}
+func (q *quarkClient) ingestVersion(ctx context.Context, cookies []*http.Cookie, version uint64) error {
 	if len(cookies) == 0 {
 		return nil
 	}
-	q.mu.Lock()
-	changed := false
-	if q.credentials.Cookies == nil {
-		q.credentials.Cookies = map[string]string{}
-	}
-	for _, c := range cookies {
-		// Only account API responses call this method. CDN/OSS cookies do not
-		// become account credentials, and cookie names/values are validated.
-		if c.Name == "" || c.Valid() != nil {
-			continue
+	return q.updateCredential(ctx, quarkCookieChannel, version, func(credentials *quarkCredentials) bool {
+		changed := false
+		if credentials.Cookies == nil {
+			credentials.Cookies = map[string]string{}
 		}
-		if c.MaxAge < 0 || !c.Expires.IsZero() && c.Expires.Before(time.Now()) {
-			if _, ok := q.credentials.Cookies[c.Name]; ok {
-				delete(q.credentials.Cookies, c.Name)
+		for _, c := range cookies {
+			// Only account API responses call this method. CDN/OSS cookies do not
+			// become account credentials, and cookie names/values are validated.
+			if c.Name == "" || c.Valid() != nil {
+				continue
+			}
+			if c.MaxAge < 0 || !c.Expires.IsZero() && c.Expires.Before(time.Now()) {
+				if _, ok := credentials.Cookies[c.Name]; ok {
+					delete(credentials.Cookies, c.Name)
+					changed = true
+				}
+			} else if credentials.Cookies[c.Name] != c.Value {
+				credentials.Cookies[c.Name] = c.Value
 				changed = true
 			}
-		} else if q.credentials.Cookies[c.Name] != c.Value {
-			q.credentials.Cookies[c.Name] = c.Value
-			changed = true
 		}
-	}
-	q.mu.Unlock()
-	if changed && q.save != nil {
-		return q.save(q.snapshot())
-	}
-	return nil
+		return changed
+	})
 }
 func (q *quarkClient) routes() []quarkRoute {
 	c := q.snapshot()
@@ -237,14 +236,15 @@ func (q *quarkClient) call(ctx context.Context, route quarkRoute, method, path s
 	rejectedToken := q.snapshot().AccessToken
 	out, err := q.request(ctx, route, method, path, query, body, false)
 	if route == quarkOpen && quarkAuthError(err) && (method == "GET" || method == "HEAD" || quarkMutationRejected(err)) && q.snapshot().RefreshToken != "" {
-		if re := q.rotate(ctx, rejectedToken); re == nil {
-			return q.request(ctx, route, method, path, query, body, false)
+		if re := q.rotate(ctx, rejectedToken); re != nil {
+			return nil, re
 		}
+		return q.request(ctx, route, method, path, query, body, false)
 	}
 	return out, err
 }
 func (q *quarkClient) request(ctx context.Context, route quarkRoute, method, path string, query url.Values, body any, noAccess bool) (map[string]any, error) {
-	c := q.snapshot()
+	c, cookieVersion := q.snapshotChannel(quarkCookieChannel)
 	endpoint := q.endpoints[route] + path
 	if strings.HasPrefix(path, "/desktop/") || strings.HasPrefix(path, "/account/") {
 		endpoint = q.pan + path
@@ -321,7 +321,7 @@ func (q *quarkClient) request(ctx context.Context, route quarkRoute, method, pat
 		return nil, errors.New("夸克响应超过 8 MiB")
 	}
 	if route != quarkOpen {
-		if e := q.ingest(resp.Cookies()); e != nil {
+		if e := q.ingestVersion(ctx, resp.Cookies(), cookieVersion); e != nil {
 			return nil, e
 		}
 	}
@@ -382,7 +382,7 @@ func (q *quarkClient) rotate(ctx context.Context, rejectedToken string) error {
 		return err
 	}
 	defer q.refresh.Unlock()
-	c := q.snapshot()
+	c, version := q.snapshotChannel(quarkOAuthChannel)
 	if c.AccessToken != rejectedToken {
 		return nil
 	}
@@ -399,14 +399,10 @@ func (q *quarkClient) rotate(ctx context.Context, rejectedToken string) error {
 	if access == "" || refresh == "" {
 		return errors.New("夸克开放平台刷新响应缺少令牌")
 	}
-	q.mu.Lock()
-	q.credentials.AccessToken = access
-	q.credentials.RefreshToken = refresh
-	q.mu.Unlock()
-	if q.save != nil {
-		return q.save(q.snapshot())
-	}
-	return nil
+	return q.updateCredential(ctx, quarkOAuthChannel, version, func(c *quarkCredentials) bool {
+		c.AccessToken, c.RefreshToken = access, refresh
+		return true
+	})
 }
 func (q *quarkClient) validBodyURL(raw string) error {
 	if err := validDAVURL(raw); err != nil {

@@ -396,9 +396,10 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "路径分隔符编码无效", 400)
 		return
 	}
-	if s.fs.transfers != nil && (r.Method == "PUT" || r.Method == "GET" || r.Method == "COPY") {
+	downloadsBody := r.Method == http.MethodGet || r.Method == http.MethodPost
+	if s.fs.transfers != nil && (r.Method == "PUT" || downloadsBody || r.Method == "COPY") {
 		kind := "下载"
-		if r.Method != "GET" {
+		if !downloadsBody {
 			kind = "上传"
 		}
 		release, err := s.fs.transfers.file(r.Context(), kind, strings.TrimPrefix(r.URL.Path, "/dav"))
@@ -522,7 +523,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if (r.Method == "GET" || r.Method == "HEAD") && davNeedsFreshRead(r) {
+	if (downloadsBody || r.Method == http.MethodHead) && davNeedsFreshRead(r) {
 		r = r.WithContext(s.fs.freshReadContext(r.Context()))
 	}
 	if r.Method == "PUT" {
@@ -977,7 +978,7 @@ func (d *davManager) prepareMount(ctx context.Context, sel davMountInput, a guiA
 			return nil, davSavedMount{}, e
 		}
 		if !backupUnavailable {
-			m.drive = &backupDAVDrive{primary: m.drive, backup: backup, root: m.Root, paths: map[string]string{m.Root: ""}, entries: map[string]davEntry{}}
+			m.drive = &backupDAVDrive{primary: m.drive, backup: backup, root: m.Root}
 			checkCtx, cancel := context.WithTimeout(mountCtx, 40*time.Second)
 			_, checkErr := m.drive.List(checkCtx, m.Root)
 			cancel()

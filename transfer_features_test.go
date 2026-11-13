@@ -828,7 +828,7 @@ func TestOpenListMappingVerificationAndReadOnlyFallback(t *testing.T) {
 		t.Fatal("mapping proof not cleaned up")
 	}
 	primary := &failingBackupPrimary{fakeDAVDrive: base, failList: true, uploadError: &davNotExecuted{errors.New("rejected before execution")}, errorMutation: &davNotExecuted{errors.New("rejected before execution")}}
-	b := &backupDAVDrive{primary: primary, backup: api, root: "0", paths: map[string]string{"0": ""}, entries: map[string]davEntry{}}
+	b := &backupDAVDrive{primary: primary, backup: api, root: "0"}
 	f, _ := os.CreateTemp(t.TempDir(), "body-*")
 	defer f.Close()
 	f.Write([]byte("ordinary non-video contents"))
@@ -866,7 +866,7 @@ func TestOpenListUnknownWriteOutcomeIsNotReplayed(t *testing.T) {
 	base := newFakeDAV(t)
 	api, writes := newOpenListFixture(t, base)
 	primary := &failingBackupPrimary{fakeDAVDrive: base, uploadError: errors.New("unexpected EOF"), errorMutation: errors.New("context deadline exceeded")}
-	b := &backupDAVDrive{primary: primary, backup: api, root: "0", paths: map[string]string{"0": "", "i": "target.txt"}, entries: map[string]davEntry{}}
+	b := &backupDAVDrive{primary: primary, backup: api, root: "0"}
 	f, _ := os.CreateTemp(t.TempDir(), "body-*")
 	defer f.Close()
 	f.Write([]byte("data"))
@@ -891,7 +891,8 @@ func TestOpenListProxyBodyUsedWhenRawURLFails(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	b := &backupDAVDrive{primary: base, backup: api, paths: map[string]string{"0": "", entry.ID: "proof.txt"}, entries: map[string]davEntry{}}
+	b := &backupDAVDrive{primary: base, backup: api, root: "0"}
+	b.remember("0", []davEntry{entry})
 	routes := b.ReadRoutes(context.Background(), entry)
 	routes = routes[len(routes)-2:]
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "bad raw URL", 503) }))

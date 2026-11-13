@@ -174,23 +174,45 @@ func (f *davFS) lookup(ctx context.Context, name string) (davNode, error) {
 				continue
 			}
 		}
-		entries, e := f.listing(scopedDAV(ctx, m, currentPath), m, n.entry.ID)
+		listContext := scopedDAV(ctx, m, currentPath)
+		if backup, ok := m.drive.(*backupDAVDrive); ok {
+			listContext = backup.parentContext(listContext, n.entry)
+		}
+		entries, e := f.listing(listContext, m, n.entry.ID)
 		if e != nil {
 			return davNode{}, e
 		}
-		var found *davEntry
-		for i := range entries {
-			if entries[i].Name == part {
-				if found != nil {
-					return davNode{}, davCloudError(ctx, errors.New("云盘同一目录存在同名条目，无法唯一定位 WebDAV 路径"))
-				}
-				found = &entries[i]
+		var entry davEntry
+		for attempt := 0; ; attempt++ {
+			found, e := uniqueNamedEntry(entries, part)
+			if e != nil {
+				return davNode{}, davCloudError(ctx, e)
 			}
+			if found == nil {
+				return davNode{}, os.ErrNotExist
+			}
+			entry = *found
+			backup, ok := m.drive.(*backupDAVDrive)
+			if !ok {
+				break
+			}
+			entry, e = backup.bindLocation(ctx, n.entry, entry)
+			if e == nil {
+				break
+			}
+			if attempt != 0 || !errors.Is(e, errBackupPathUnavailable) {
+				return davNode{}, davCloudError(ctx, e)
+			}
+			// A detached cache entry can outlive a newer directory publication.
+			// Refresh this one directory before selecting a current native ID.
+			epoch := f.dirCache.invalidateDirectory(m.Alias, n.entry.ID)
+			entries, e = f.queryDirectory(listContext, m, n.entry.ID)
+			if e != nil {
+				return davNode{}, e
+			}
+			f.dirCache.put(m, n.entry.ID, entries, epoch)
 		}
-		if found == nil {
-			return davNode{}, os.ErrNotExist
-		}
-		n = davNode{entry: *found, mount: m, parent: n.entry.ID}
+		n = davNode{entry: entry, mount: m, parent: n.entry.ID}
 		currentPath = nextPath
 		if snapshot != nil {
 			snapshot.nodes[currentPath] = n
@@ -353,13 +375,15 @@ func (f *davFS) verify(ctx context.Context, m *davMount, parent, name string, si
 		if e != nil {
 			return e
 		}
-		for _, it := range a {
-			if it.Name == name && (size < 0 || it.Size == size) {
-				if !sameCloudObject(it, expected) {
-					return davCloudError(ctx, errors.New("目标名称已出现但对象身份不符，未确认操作成功"))
-				}
-				return nil
+		it, e := uniqueNamedEntry(a, name)
+		if e != nil {
+			return davCloudError(ctx, e)
+		}
+		if it != nil && (size < 0 || it.Size == size) {
+			if !sameCloudObject(*it, expected) {
+				return davCloudError(ctx, errors.New("目标名称已出现但对象身份不符，未确认操作成功"))
 			}
+			return nil
 		}
 		if e = davWait(ctx, 300*time.Millisecond); e != nil {
 			return e
@@ -548,7 +572,11 @@ func (d *davFile) Readdir(count int) ([]os.FileInfo, error) {
 			entries = append(entries, davEntry{Item: Item{ID: m.Root, Name: m.Alias, Directory: true}})
 		}
 	} else {
-		a, e := d.fs.listing(scopedDAV(d.ctx, d.node.mount, d.name), d.node.mount, d.node.entry.ID)
+		listContext := scopedDAV(d.ctx, d.node.mount, d.name)
+		if backup, ok := d.node.mount.drive.(*backupDAVDrive); ok {
+			listContext = backup.parentContext(listContext, d.node.entry)
+		}
+		a, e := d.fs.listing(listContext, d.node.mount, d.node.entry.ID)
 		if e != nil {
 			return nil, e
 		}

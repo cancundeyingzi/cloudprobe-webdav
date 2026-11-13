@@ -2,7 +2,7 @@ const quarkCapacities = new Map();
 let quarkTargetKeys = '', quarkBusy = false;
 function paintQuarkStatus(s){
   const q=s.quark||{},running=!!q.running;
-  $('quark-login-status').textContent=(q.stage||'尚未开始登录')+(q.error?'\n'+q.error:'');
+  $('quark-login-status').textContent=(q.stage||'尚未开始登录')+(q.error?'\n'+q.error:'')+(q.credential_save_pending?'\n新授权尚未保存，正在重试；关闭程序前请等待保存完成。':'');
   $('quark-login-badge').textContent=running?'等待授权':(s.accounts||[]).some(a=>a.provider==='quark')?'已有账号':'未登录';
   $('quark-qr-image').classList.toggle('hidden',!q.image);$('quark-qr-placeholder').classList.toggle('hidden',!!q.image);
   if(q.image&&$('quark-qr-image').src!==q.image)$('quark-qr-image').src=q.image;

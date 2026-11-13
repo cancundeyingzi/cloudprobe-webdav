@@ -104,32 +104,18 @@ func configureDAVMounts(in *davStartInput, cfg *davSavedConfig, previous davSave
 			}
 		}
 	}
-	aliases := map[string]bool{}
 	for i := range in.Mounts {
 		sel := &in.Mounts[i]
 		a, ok := accounts[sel.Account]
 		if !ok || davIdentity(a) == "" {
 			return errors.New("所选账号缺少稳定身份，请刷新账号列表")
 		}
-		if e := safeFilename(sel.Alias); e != nil || aliases[sel.Alias] {
-			return errors.New("挂载名必须是唯一的普通文件夹名称")
-		}
-		aliases[sel.Alias] = true
 		if sel.Root == "" {
 			sel.Root = a.Root
 		}
 		if (a.Provider == "wopan" || a.Provider == "quark") && sel.Root == "root" {
 			sel.Root = "0"
 		}
-		if strings.ContainsAny(sel.Root, "\r\n\x00") {
-			return errors.New("根目录 ID 无效")
-		}
-		if sel.UploadStorageMode != "" && sel.UploadStorageMode != "memory" && sel.UploadStorageMode != "disk" && sel.UploadStorageMode != "auto" {
-			return errors.New("挂载上传缓存方式无效")
-		}
-	}
-	if err := validateDAVMountResources(in.Mounts, accounts); err != nil {
-		return err
 	}
 	for _, sel := range in.Mounts {
 		a := accounts[sel.Account]
@@ -138,7 +124,7 @@ func configureDAVMounts(in *davStartInput, cfg *davSavedConfig, previous davSave
 			cfg.Mounts = append(cfg.Mounts, saved)
 		}
 	}
-	return nil
+	return validateSavedDAVMounts(cfg.Mounts)
 }
 
 func (d *davManager) startDAVListener(in davStartInput, cfg davSavedConfig) error {

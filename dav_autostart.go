@@ -182,6 +182,9 @@ func (d *davManager) acceptMountAccount(ctx context.Context, cfg davSavedConfig,
 	next := cfg
 	next.Mounts = append(append([]davSavedMount{}, cfg.Mounts...), m)
 	next.KnownAccounts = appendUnique(append([]string{}, cfg.KnownAccounts...), id)
+	if err := validateSavedDAVMounts(next.Mounts); err != nil {
+		return cfg, err
+	}
 	lockCtx, lockCancel := context.WithTimeout(ctx, 2*time.Second)
 	lease, err := lockFileWait(lockCtx, filepath.Join(d.app.data, "webdav-config.lock"))
 	lockCancel()

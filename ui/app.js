@@ -55,9 +55,12 @@ document.querySelectorAll('[data-log-tab]').forEach(button => {
 $('go-files').onclick = () => {$('login-drawer').close();tab('files')};
 try { tab(sessionStorage.getItem('cloudprobe-page-' + location.port) || 'login'); } catch { tab('login'); }
 function paintConsoleStatus(s) {
-	const pending = Number(s.credential_save_pending || 0), warning = $('credential-save-warning');
-	warning.classList.toggle('hidden',pending === 0);
-	warning.textContent = pending ? '有 ' + pending + ' 个账号的新授权尚未保存。' + (s.credential_save_error || '正在重试保存。') : '';
+  const pending = Number(s.credential_save_pending || 0), warning = $('credential-save-warning'), messages = [];
+  if(pending)messages.push('有 ' + pending + ' 个云盘账号的新授权尚未保存。' + (s.credential_save_error || '正在重试保存。'));
+  const quark = s.quark || {};
+  if(quark.credential_save_pending)messages.push('夸克新授权已在内存生效，尚未保存。' + (quark.credential_save_error || '正在保存，请稍候。'));
+  warning.classList.toggle('hidden',messages.length === 0);
+  warning.textContent = messages.join('\n');
   const d = s.webdav || {}, running = !!d.running;
   $('account-dot').classList.toggle('ready',!!(s.has_accounts || s.logged_in));
   $('global-login').textContent = s.has_accounts || s.logged_in ? '已添加云盘账号' : '账号未登录';

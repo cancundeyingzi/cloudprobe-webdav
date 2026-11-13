@@ -33,17 +33,18 @@ type downloadAttempt struct {
 func (a *downloadAttempt) close() { a.Body.Close(); a.release() }
 
 type downloadSession struct {
-	ctx        context.Context
-	routes     []*resolvedReadRoute
-	health     *routeHealth
-	signature  downloadSignature
-	budget     *fairLimiter
-	size       int64
-	client     *http.Client
-	preferred  int
-	mu         sync.Mutex
-	bytesRead  atomic.Int64
-	retryDelay time.Duration
+	ctx         context.Context
+	routes      []*resolvedReadRoute
+	health      *routeHealth
+	signature   downloadSignature
+	budget      *fairLimiter
+	size        int64
+	client      *http.Client
+	preferred   int
+	mu          sync.Mutex
+	bytesRead   atomic.Int64
+	retryDelay  time.Duration
+	idleTimeout time.Duration
 }
 
 func (s *downloadSession) record(ctx context.Context, n int) {
@@ -55,15 +56,35 @@ func (s *downloadSession) record(ctx context.Context, n int) {
 
 type idleReadBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	ctx, parent context.Context
+	cancel      context.CancelCauseFunc
+	timeout     time.Duration
 }
 
-func (b *idleReadBody) Read(p []byte) (int, error) {
-	timer := time.AfterFunc(35*time.Second, b.cancel)
-	defer timer.Stop()
-	return b.ReadCloser.Read(p)
+type downloadIdleError struct{}
+
+func (*downloadIdleError) Error() string {
+	return "下载正文持续无进度，重新选择读取通道"
 }
-func (b *idleReadBody) Close() error { b.cancel(); return b.ReadCloser.Close() }
+func (*downloadIdleError) Timeout() bool   { return true }
+func (*downloadIdleError) Temporary() bool { return true }
+
+func (b *idleReadBody) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(b.timeout, func() { b.cancel(&downloadIdleError{}) })
+	defer timer.Stop()
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		if parentErr := b.parent.Err(); parentErr != nil {
+			return n, parentErr
+		}
+		var idle *downloadIdleError
+		if errors.As(context.Cause(b.ctx), &idle) {
+			return n, idle
+		}
+	}
+	return n, err
+}
+func (b *idleReadBody) Close() error { b.cancel(nil); return b.ReadCloser.Close() }
 
 func (s *downloadSession) order() []int {
 	s.mu.Lock()
@@ -83,8 +104,20 @@ func (s *downloadSession) order() []int {
 func (s *downloadSession) open(ctx context.Context, start, end int64, ranged bool) (*downloadAttempt, error) {
 	for cycle := 1; ; cycle++ {
 		var failures []error
-		noRange, retryable := false, false
-		var serverDelay time.Duration
+		noRange, retryable, refreshNow := false, false, false
+		var retryAt time.Time
+		recordFailure := func(err error) {
+			failures = append(failures, err)
+			var pending *readRouteRetry
+			if errors.As(err, &pending) {
+				retryable = true
+				if retryAt.IsZero() || pending.at.Before(retryAt) {
+					retryAt = pending.at
+				}
+			} else if errors.Is(err, errReadRouteChanged) || retryableTransfer(err) {
+				retryable, refreshNow = true, true
+			}
+		}
 		for _, index := range s.order() {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -94,16 +127,12 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 				failures = append(failures, err)
 				continue
 			}
-			target, generation, e := route.get(ctx)
+			target, generation, e := route.get(ctx, s.retryDelay)
 			if e != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
-				e = route.failure(generation, e)
-				retryable = retryable || retryableTransfer(e)
-				failures = append(failures, e)
-				s.health.bad(route.route.Name)
-				logFallback(ctx, route.route.Name, "下一读取方案", e)
+				recordFailure(e)
 				continue
 			}
 			var release func()
@@ -115,10 +144,18 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 			} else {
 				release = func() {}
 			}
-			requestCtx, cancelRequest := context.WithCancel(ctx)
+			if e = route.ready(ctx, generation); e != nil {
+				release()
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				recordFailure(e)
+				continue
+			}
+			requestCtx, cancelRequest := context.WithCancelCause(ctx)
 			req, e := http.NewRequestWithContext(requestCtx, "GET", target.URL, nil)
 			if e != nil {
-				cancelRequest()
+				cancelRequest(nil)
 				release()
 				return nil, e
 			}
@@ -158,7 +195,11 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 			}
 			resp, e := client.Do(req)
 			if e == nil {
-				resp.Body = &idleReadBody{ReadCloser: resp.Body, cancel: cancelRequest}
+				timeout := s.idleTimeout
+				if timeout <= 0 {
+					timeout = 35 * time.Second
+				}
+				resp.Body = &idleReadBody{ReadCloser: resp.Body, ctx: requestCtx, parent: ctx, cancel: cancelRequest, timeout: timeout}
 				if resp.StatusCode == 200 && ranged {
 					resp.Body.Close()
 					release()
@@ -194,13 +235,16 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 				}
 				resp.Body.Close()
 			}
-			cancelRequest()
+			if ctx.Err() != nil {
+				cancelRequest(nil)
+				release()
+				return nil, ctx.Err()
+			}
+			e = route.failure(generation, e, s.retryDelay)
+			cancelRequest(nil)
 			release()
-			e = route.failure(generation, e)
-			retryable = retryable || retryableTransfer(e)
-			serverDelay = max(serverDelay, transferRetryAfter(e))
+			recordFailure(e)
 			s.health.bad(route.route.Name)
-			failures = append(failures, e)
 			logFallback(ctx, route.route.Name, "下一读取方案", e)
 		}
 		if noRange {
@@ -209,7 +253,12 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 		if !retryable {
 			return nil, fmt.Errorf("所有正文读取方案失败，需核对文件或授权：%w", errors.Join(failures...))
 		}
-		delay := max(serverDelay, transferRetryDelay(cycle, s.retryDelay))
+		// No body slot or route lock is held while every candidate is deferred.
+		// A stale failure can leave a fresh generation ready immediately.
+		delay := max(time.Duration(0), time.Until(retryAt))
+		if retryAt.IsZero() || refreshNow {
+			delay = 0
+		}
 		logDAV(ctx, runLogEntry{Operation: "下载故障重试", Source: "全部读取方案", Result: "等待重试", Attempt: cycle, Detail: fmt.Sprintf("次数无上限；等待 %d ms；刷新地址后重新尝试候选", delay.Milliseconds())})
 		if e := davWait(ctx, delay); e != nil {
 			return nil, e
@@ -217,7 +266,7 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 	}
 }
 func (s *downloadSession) chunk(ctx context.Context, start, end int64) ([]byte, error) {
-	for attempt := 1; ; attempt++ {
+	for {
 		started := time.Now()
 		response, e := s.open(ctx, start, end, true)
 		if e != nil {
@@ -228,19 +277,26 @@ func (s *downloadSession) chunk(ctx context.Context, start, end int64) ([]byte, 
 		n, readErr := io.ReadFull(response.Body, data)
 		e = readErr
 		s.record(ctx, n)
+		if e != nil && ctx.Err() != nil {
+			response.close()
+			return nil, ctx.Err()
+		}
+		if e != nil {
+			e = s.routes[index].failure(response.generation, e, s.retryDelay)
+		}
 		response.close()
 		if e == nil {
+			s.routes[index].completed(response.generation)
 			logDAV(ctx, runLogEntry{Operation: "下载分段", Source: s.routes[index].route.Name, Result: "已读取", Bytes: int64(n), DurationMs: time.Since(started).Milliseconds(), Detail: fmt.Sprintf("偏移 %d—%d", start, end)})
 			return data, nil
 		}
-		s.routes[index].invalidate(response.generation)
 		s.health.bad(s.routes[index].route.Name)
 		s.mu.Lock()
 		s.preferred = (index + 1) % len(s.routes)
 		s.mu.Unlock()
 		logFallback(ctx, s.routes[index].route.Name, "按相同偏移重读未交付的分段", e)
-		if err := davWait(ctx, transferRetryDelay(attempt, s.retryDelay)); err != nil {
-			return nil, err
+		if !retryableTransfer(e) {
+			return nil, e
 		}
 	}
 }
@@ -255,6 +311,8 @@ type transferReader struct {
 	partSize            int64
 	parallel            bool
 	stream              *downloadAttempt
+	streamPos           int64
+	prefix              []byte
 	wave                []chan readChunkResult
 	waveStart, waveNext int64
 	waveCancel          context.CancelFunc
@@ -264,7 +322,6 @@ type transferReader struct {
 	buffer              []byte
 	bufferOffset        int
 	closed              bool
-	streamRetries       int
 	rangeChecked        bool
 	started             time.Time
 	delivered           int64
@@ -325,6 +382,7 @@ func (d *transferReader) Close() {
 	d.closed = true
 	d.closeStream()
 	d.stopWave()
+	d.prefix = nil
 	logDAV(d.ctx, runLogEntry{Operation: "下载读取结束", Source: "云盘节点", Result: "结束", Bytes: d.session.bytesRead.Load(), DurationMs: time.Since(d.started).Milliseconds(), Detail: fmt.Sprintf("交给 WebDAV/界面的正文 %d B；节点读取量包含探测、重试和预取", d.delivered)})
 }
 func (d *transferReader) Seek(off int64, whence int) (int64, error) {
@@ -345,14 +403,14 @@ func (d *transferReader) Seek(off int64, whence int) (int64, error) {
 		return 0, errors.New("无效偏移")
 	}
 	if target != d.pos {
-		d.closeStream()
+		// ServeContent seeks to EOF to query size between its sniff and rewind.
+		// Keep the original stream parked after the small replayable prefix;
+		// Read will reopen only if the requested position cannot use that stream.
+		if d.stream == nil || d.streamPos != int64(len(d.prefix)) {
+			d.closeStream()
+		}
 		d.stopWave()
 		d.pos = target
-		d.streamRetries = 0
-		if target == 0 {
-			d.session.signature = downloadSignature{}
-			d.rangeChecked = false
-		}
 	}
 	return target, nil
 }
@@ -396,21 +454,30 @@ func (d *transferReader) Read(p []byte) (int, error) {
 	if d.ctx.Err() != nil {
 		return 0, d.ctx.Err()
 	}
+	if d.pos < int64(len(d.prefix)) {
+		n := copy(p, d.prefix[d.pos:])
+		d.pos += int64(n)
+		d.count(n)
+		return n, nil
+	}
+	if d.stream != nil && d.streamPos != d.pos {
+		d.closeStream()
+	}
 	// ServeContent may read 512 bytes to detect Content-Type, then seek back.
 	// Do not launch an entire prefetch window for that metadata probe.
 	if d.parallel {
 		if !d.rangeChecked {
 			_, e := d.session.chunk(d.ctx, d.pos, d.pos)
 			d.rangeChecked = true
-			d.session.signature.mu.Lock()
-			verifiable := d.session.signature.version != "" || d.session.signature.etag != "" || d.session.signature.modified != ""
-			d.session.signature.mu.Unlock()
+			verifiable := d.session.signature.verifiable()
 			if errors.Is(e, errRangeUnavailable) || e == nil && !verifiable {
 				if d.pos != 0 {
 					return 0, errRangeUnavailable
 				}
 				d.parallel = false
-				d.session.signature = downloadSignature{}
+				if d.delivered == 0 {
+					d.session.signature.discardProbe()
+				}
 				logDAV(d.ctx, runLogEntry{Operation: "下载模式回退", Source: "本机", Result: "单路读取", Detail: "上游未支持准确 Range 或缺少可核对的对象版本"})
 				return d.Read(p)
 			}
@@ -444,9 +511,7 @@ func (d *transferReader) Read(p []byte) (int, error) {
 			if result.err != nil {
 				d.stopWave()
 				if errors.Is(result.err, errRangeUnavailable) && d.pos == 0 {
-					d.stopWave()
 					d.parallel = false
-					d.session.signature = downloadSignature{}
 					logDAV(d.ctx, runLogEntry{Operation: "下载模式回退", Source: "本机", Result: "单路读取", Detail: "上游未支持准确 Range；完整下载改用单路流式读取"})
 					return d.Read(p)
 				}
@@ -456,6 +521,7 @@ func (d *transferReader) Read(p []byte) (int, error) {
 			d.bufferOffset = 0
 		}
 		n := copy(p, d.buffer[d.bufferOffset:])
+		d.rememberPrefix(p[:n])
 		d.bufferOffset += n
 		d.pos += int64(n)
 		d.count(n)
@@ -471,29 +537,38 @@ func (d *transferReader) Read(p []byte) (int, error) {
 				return 0, e
 			}
 			d.stream = attempt
+			d.streamPos = d.pos
 		}
 		if int64(len(p)) > d.size-d.pos {
 			p = p[:d.size-d.pos]
 		}
 		n, e := d.stream.Body.Read(p)
 		d.session.record(d.ctx, n)
+		d.rememberPrefix(p[:n])
 		d.pos += int64(n)
+		d.streamPos += int64(n)
 		d.count(n)
+		if e != nil && d.ctx.Err() != nil {
+			d.closeStream()
+			return n, d.ctx.Err()
+		}
 		if e == io.EOF && d.pos < d.size {
 			e = io.ErrUnexpectedEOF
 		}
+		if d.pos == d.size && (e == nil || e == io.EOF) {
+			d.session.routes[d.stream.index].completed(d.stream.generation)
+		}
 		if e != nil && d.pos < d.size {
 			index, generation := d.stream.index, d.stream.generation
+			e = d.session.routes[index].failure(generation, e, d.session.retryDelay)
 			d.closeStream()
-			d.session.routes[index].invalidate(generation)
 			d.session.health.bad(d.session.routes[index].route.Name)
 			d.session.mu.Lock()
 			d.session.preferred = (index + 1) % len(d.session.routes)
 			d.session.mu.Unlock()
-			d.streamRetries++
 			logFallback(d.ctx, d.session.routes[index].route.Name, "从已交付字节偏移恢复正文", e)
-			if waitErr := davWait(d.ctx, transferRetryDelay(d.streamRetries, d.session.retryDelay)); waitErr != nil {
-				return n, waitErr
+			if !retryableTransfer(e) {
+				return n, e
 			}
 			if n > 0 {
 				return n, nil
@@ -503,6 +578,13 @@ func (d *transferReader) Read(p []byte) (int, error) {
 		return n, e
 	}
 }
+
+func (d *transferReader) rememberPrefix(p []byte) {
+	if d.pos == int64(len(d.prefix)) && len(d.prefix) < 512 {
+		d.prefix = append(d.prefix, p[:min(len(p), 512-len(d.prefix))]...)
+	}
+}
+
 func (d *transferReader) count(n int) {
 	d.delivered += int64(n)
 }
