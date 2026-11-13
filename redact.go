@@ -15,6 +15,7 @@ const hidden = "[已隐藏]"
 type Redactor struct {
 	mu      sync.RWMutex
 	secrets []string
+	seen    map[string]struct{}
 }
 
 func newRedactor(c Config) *Redactor {
@@ -27,12 +28,23 @@ func newRedactor(c Config) *Redactor {
 	}
 	return r
 }
-func (r *Redactor) Add(s string) {
+func (r *Redactor) Add(values ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if s != "" {
-		r.secrets = append(r.secrets, s)
-		sort.SliceStable(r.secrets, func(i, j int) bool { return len(r.secrets[i]) > len(r.secrets[j]) })
+	if r.seen == nil {
+		r.seen = map[string]struct{}{}
+	}
+	changed := false
+	for _, value := range values {
+		if _, present := r.seen[value]; value == "" || present {
+			continue
+		}
+		r.seen[value] = struct{}{}
+		r.secrets = append(r.secrets, value)
+		changed = true
+	}
+	if changed {
+		sort.Slice(r.secrets, func(i, j int) bool { return len(r.secrets[i]) > len(r.secrets[j]) })
 	}
 }
 func sensitive(k string) bool {

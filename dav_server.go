@@ -663,21 +663,38 @@ func (w *davResponse) Write(b []byte) (int, error) {
 }
 
 func (g *guiApp) redactDAV(text string) string {
+	return g.snapshotDAVRedactor()(text)
+}
+
+func (g *guiApp) rememberSecretsLocked(values ...string) {
+	if g.extraSecrets == nil {
+		g.extraSecrets = map[string]struct{}{}
+	}
+	for _, value := range values {
+		if value != "" {
+			g.extraSecrets[value] = struct{}{}
+		}
+	}
+}
+
+func (g *guiApp) snapshotDAVRedactor() func(string) string {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	r := &Redactor{}
-	for _, secret := range g.extraSecrets {
-		r.Add(secret)
+	secrets := make([]string, 0, len(g.extraSecrets)+len(g.accounts)*4+1)
+	for secret := range g.extraSecrets {
+		secrets = append(secrets, secret)
 	}
 	for _, a := range g.accounts {
 		for k, v := range a.credentials {
 			if sensitive(k) {
-				r.Add(valueString(v))
+				secrets = append(secrets, valueString(v))
 			}
 		}
 	}
-	r.Add(g.identity.AppSecret)
-	return r.Text(text)
+	secrets = append(secrets, g.identity.AppSecret)
+	g.mu.Unlock()
+	r := &Redactor{}
+	r.Add(secrets...)
+	return r.Text
 }
 func (g *guiApp) davAPI(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/webdav/wopan-login/") {
@@ -945,7 +962,7 @@ func (d *davManager) prepareMount(ctx context.Context, sel davMountInput, a guiA
 	savedMount := davSavedMount{UploadStorageMode: m.UploadStorageMode, Identity: m.Identity, Alias: m.Alias, Root: m.Root, Writable: m.Writable}
 	if backupConfig != nil {
 		g.mu.Lock()
-		g.extraSecrets = append(g.extraSecrets, backupConfig.Token, backupConfig.MetaPassword)
+		g.rememberSecretsLocked(backupConfig.Token, backupConfig.MetaPassword)
 		g.mu.Unlock()
 		backup, e := newOpenListClient(backupConfig.openListInput)
 		if e != nil {

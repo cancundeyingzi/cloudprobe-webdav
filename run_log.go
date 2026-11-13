@@ -84,6 +84,7 @@ type runtimeLog struct {
 	dropped                                atomic.Uint64
 	retentionRetry                         time.Time
 	clean                                  func(string) string
+	snapshotClean                          func() func(string) string
 	fileBytes, maxFileBytes, maxTotalBytes int64
 	maxFiles, segment                      int
 	segments                               []string
@@ -111,9 +112,12 @@ func newRuntimeLog(profile string, clean func(string) string) *runtimeLog {
 	go l.diskLoop()
 	return l
 }
-func (l *runtimeLog) sanitize(s string) string {
-	if l.clean != nil {
-		s = l.clean(s)
+func sanitizeLogText(s string, clean func(string) string) string {
+	if s == "" {
+		return ""
+	}
+	if clean != nil {
+		s = clean(s)
 	}
 	if len(s) > 4096 {
 		s = s[:4096] + "…"
@@ -137,17 +141,22 @@ func (l *runtimeLog) add(e runLogEntry) {
 	if l == nil {
 		return
 	}
-	e.RequestID = l.sanitize(e.RequestID)
-	e.Method = l.sanitize(e.Method)
-	e.Mount = l.sanitize(e.Mount)
-	e.Path = l.sanitize(e.Path)
-	e.Source = l.sanitize(e.Source)
-	e.Endpoint = l.sanitize(e.Endpoint)
-	e.Detail = l.sanitize(e.Detail)
-	e.Error = l.sanitize(e.Error)
+	clean := l.clean
+	if l.snapshotClean != nil {
+		clean = l.snapshotClean()
+	}
+	sanitize := func(value string) string { return sanitizeLogText(value, clean) }
+	e.RequestID = sanitize(e.RequestID)
+	e.Method = sanitize(e.Method)
+	e.Mount = sanitize(e.Mount)
+	e.Path = sanitize(e.Path)
+	e.Source = sanitize(e.Source)
+	e.Endpoint = sanitize(e.Endpoint)
+	e.Detail = sanitize(e.Detail)
+	e.Error = sanitize(e.Error)
 	e.Items = append([]runLogItem(nil), e.Items[:min(100, len(e.Items))]...)
 	for i := range e.Items {
-		e.Items[i].Name = l.sanitize(e.Items[i].Name)
+		e.Items[i].Name = sanitize(e.Items[i].Name)
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

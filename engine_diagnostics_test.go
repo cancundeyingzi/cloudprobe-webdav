@@ -46,7 +46,7 @@ func TestEngineDiagnosticsCaptureRealExitWithoutLeakingCredentials(t *testing.T)
 	}
 	bridge := &OriginalBridge{cmd: cmd, lastErr: err, stderr: tail, done: make(chan struct{})}
 	close(bridge.done)
-	g := &guiApp{bridge: bridge, extraSecrets: []string{"private-unlabelled-value"}, enginePaths: enginePaths{SDK: "example/sdk", Bridge: "example/bridge/CloudProbe.Bridge.dll", Data: "example/data"}}
+	g := &guiApp{bridge: bridge, extraSecrets: map[string]struct{}{"private-unlabelled-value": {}}, enginePaths: enginePaths{SDK: "example/sdk", Bridge: "example/bridge/CloudProbe.Bridge.dll", Data: "example/data"}}
 	status := g.publicStatus()
 	d, ok := status["engine_diagnostic"].(*engineFailure)
 	if !ok || status["engine_ready"] != false {

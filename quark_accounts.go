@@ -86,16 +86,7 @@ func (m *quarkManager) rememberSecrets(c quarkCredentials) {
 		if value == "" {
 			continue
 		}
-		exists := false
-		for _, old := range m.app.extraSecrets {
-			if old == value {
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			m.app.extraSecrets = append(m.app.extraSecrets, value)
-		}
+		m.app.rememberSecretsLocked(value)
 	}
 	m.app.mu.Unlock()
 }

@@ -218,7 +218,7 @@ func (g *guiApp) acceptCloudAccount(ctx context.Context, incoming guiAccount) er
 	g.rebuildAccountOrderLocked()
 	for k, v := range a.credentials {
 		if sensitive(k) {
-			g.extraSecrets = append(g.extraSecrets, valueString(v))
+			g.rememberSecretsLocked(valueString(v))
 		}
 	}
 	return nil

@@ -61,7 +61,7 @@ func cloneGUIAccount(a guiAccount) guiAccount {
 
 type guiApp struct {
 	quark                 *quarkManager
-	extraSecrets          []string
+	extraSecrets          map[string]struct{}
 	runLog                *runtimeLog
 	webLogin              *wopanWebLogin
 	mobileLogin           *cloudWebLogin
@@ -776,6 +776,7 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	}
 	app.enginePaths = enginePaths{Executable: exe, SDK: *sdk, Bridge: *bridgePath, Data: *data}
 	app.runLog = newRuntimeLog(*data, app.redactDAV)
+	app.runLog.snapshotClean = app.snapshotDAVRedactor
 	defer app.runLog.close()
 	app.restoreCloudAccounts()
 	app.quark = newQuarkManager(app)
