@@ -31,11 +31,6 @@ type davMount struct {
 	writeMu           sync.RWMutex
 	writeWarning      *davWriteWarning
 }
-type davCache struct {
-	mount   *davMount
-	entries []davEntry
-	until   time.Time
-}
 type davFS struct {
 	mountMu      sync.RWMutex
 	mounts       []*davMount
@@ -141,9 +136,23 @@ func (f *davFS) lookup(ctx context.Context, name string) (davNode, error) {
 	if clean == "/" {
 		return davNode{entry: davEntry{Item: Item{ID: "virtual-root", Name: "/", Directory: true}}, virtual: true}, nil
 	}
+	// Keep only verified path nodes for a conditional request. Retaining entire
+	// ancestor listings here would pin large snapshots for the whole download.
+	snapshot := f.readSnapshot(ctx)
+	if snapshot != nil {
+		snapshot.mu.Lock()
+		defer snapshot.mu.Unlock()
+		if node, ok := snapshot.nodes[clean]; ok {
+			return node, nil
+		}
+	}
 	parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
 	var m *davMount
-	for _, candidate := range f.mountSnapshot() {
+	mounts := f.mountSnapshot()
+	if snapshot != nil {
+		mounts = snapshot.mounts
+	}
+	for _, candidate := range mounts {
 		if candidate.Alias == parts[0] {
 			m = candidate
 			break
@@ -157,6 +166,13 @@ func (f *davFS) lookup(ctx context.Context, name string) (davNode, error) {
 	for _, part := range parts[1:] {
 		if !n.entry.Directory {
 			return davNode{}, os.ErrNotExist
+		}
+		nextPath := path.Join(currentPath, part)
+		if snapshot != nil {
+			if node, ok := snapshot.nodes[nextPath]; ok {
+				n, currentPath = node, nextPath
+				continue
+			}
 		}
 		entries, e := f.listing(scopedDAV(ctx, m, currentPath), m, n.entry.ID)
 		if e != nil {
@@ -175,7 +191,10 @@ func (f *davFS) lookup(ctx context.Context, name string) (davNode, error) {
 			return davNode{}, os.ErrNotExist
 		}
 		n = davNode{entry: *found, mount: m, parent: n.entry.ID}
-		currentPath = path.Join(currentPath, part)
+		currentPath = nextPath
+		if snapshot != nil {
+			snapshot.nodes[currentPath] = n
+		}
 	}
 	return n, nil
 }

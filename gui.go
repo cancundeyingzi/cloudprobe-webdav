@@ -68,7 +68,12 @@ type guiApp struct {
 	cloudAccountError     string
 	dav                   *davManager
 	mu                    sync.Mutex
-	op                    sync.Mutex
+	op                    contextMutex
+	lifetime              context.Context
+	requestOnce           sync.Once
+	requestContext        context.Context
+	cancelRequests        context.CancelFunc
+	shutdownOnce          sync.Once
 	bridge                *OriginalBridge
 	stage                 string
 	engineError           string
@@ -195,7 +200,9 @@ func (g *guiApp) loadAccounts(ctx context.Context) error {
 	return nil
 }
 func (g *guiApp) restore(ctx context.Context) {
-	g.op.Lock()
+	if g.op.LockContext(ctx) != nil {
+		return
+	}
 	defer g.op.Unlock()
 	data, e := g.call(ctx, "GET", "/v1/account/info", map[string]any{})
 	if e != nil {
@@ -425,6 +432,12 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "界面会话已失效，请重新运行 cloudprobe.exe 打开管理界面", 403)
 		return
 	}
+	r, releaseRequest := g.bindRequest(r)
+	defer releaseRequest()
+	if r.Context().Err() != nil && r.URL.Path != "/api/quit" {
+		http.Error(w, "程序正在退出，请重新启动后访问", http.StatusServiceUnavailable)
+		return
+	}
 	if r.URL.Path == "/api/status" && r.Method == "GET" {
 		respondJSON(w, 200, g.publicStatus())
 		return
@@ -497,8 +510,17 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.fail(w, e)
 		return
 	}
-	g.op.Lock()
-	defer g.op.Unlock()
+	if r.URL.Path == "/api/quit" {
+		respondJSON(w, 200, map[string]any{"ok": true})
+		g.quit()
+		return
+	}
+	if r.URL.Path != "/api/list" && r.URL.Path != "/api/fetch" {
+		if !g.lockOperation(w, r) {
+			return
+		}
+		defer g.op.Unlock()
+	}
 	switch r.URL.Path {
 	case "/api/qr":
 		data, e := g.createQR(r.Context())
@@ -610,6 +632,10 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			e = de
 		}
+		if err := r.Context().Err(); err != nil {
+			g.fail(w, err)
+			return
+		}
 		if e == nil && report.Complete {
 			if drive, _, driveErr := g.guiReadDrive(input.Account, cl); driveErr == nil {
 				if backup, ok := drive.(*backupDAVDrive); ok {
@@ -623,6 +649,11 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.mu.Lock()
+		if err := r.Context().Err(); err != nil {
+			g.mu.Unlock()
+			g.fail(w, err)
+			return
+		}
 		g.lastResult = cl.folder
 		g.mu.Unlock()
 		if e != nil {
@@ -662,6 +693,13 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		receipt, e := guiFetchRedundant(logCtx, drive, runtime, cl, entry, input.Name, func() error {
+			g.mu.Lock()
+			current, exists := g.accounts[input.Account]
+			valid := exists && davIdentity(current) == davIdentity(account)
+			g.mu.Unlock()
+			if !valid {
+				return errors.New("云盘账号已变化，未保留本次下载")
+			}
 			_, err := verifyGUIEntry(logCtx, drive, input.Directory, entry, input.AllowCurrent)
 			return err
 		})
@@ -671,14 +709,17 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		key := randomKey()
 		g.mu.Lock()
+		if err := r.Context().Err(); err != nil {
+			g.mu.Unlock()
+			_ = os.Remove(filepath.Join(cl.folder, input.Name))
+			g.fail(w, err)
+			return
+		}
 		g.downloads[key] = guiDownload{Path: filepath.Join(cl.folder, input.Name), Name: input.Name}
 		g.lastResult = cl.folder
 		g.mu.Unlock()
 		g.event("指定文件已下载到测试目录")
 		respondJSON(w, 200, map[string]any{"ok": true, "download_key": key, "receipt": receipt, "version_verified": entry.ContentVersion != "" || entry.FID != ""})
-	case "/api/quit":
-		respondJSON(w, 200, map[string]any{"ok": true})
-		go func() { time.Sleep(200 * time.Millisecond); g.shutdown() }()
 	default:
 		http.NotFound(w, r)
 	}
@@ -767,7 +808,8 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		return 1, e
 	}
 	defer listener.Close()
-	app := &guiApp{stage: "正在启动原版引擎", accounts: map[string]guiAccount{}, downloads: map[string]guiDownload{}, data: *data, nonce: randomKey(), host: listener.Addr().String(), shutdown: cancel}
+	app := &guiApp{stage: "正在启动原版引擎", accounts: map[string]guiAccount{}, downloads: map[string]guiDownload{}, data: *data, nonce: randomKey(), host: listener.Addr().String(), shutdown: cancel, lifetime: ctx}
+	defer app.stopRequests()
 	if e = cleanupLegacyLockStripes(filepath.Join(*data, "webdav-spool", "resume")); e != nil {
 		return 1, e
 	}
@@ -841,6 +883,7 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		_ = server.Shutdown(shutdownCtx)
 	}()
 	e = server.Serve(listener)
+	app.stopRequests()
 	close(stopped)
 	app.webLogin.Stop()
 	app.dav.Stop()

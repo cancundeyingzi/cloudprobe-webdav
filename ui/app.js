@@ -91,7 +91,7 @@ function paintConsoleStatus(s) {
   $('entry-quark-status').textContent=s.quark&&s.quark.running?'登录中…':'扫码 / 手机号';
   $('entry-netease-status').textContent=s.logged_in?'已登录 · 绑定账号授权':'绑定账号授权';
 }
-function notice(text,kind='error'){for(const id of ['notice','drawer-notice']){const n=$(id);n.textContent=text;n.className='banner '+kind;n.classList.toggle('hidden',!text)}}
+function notice(text,kind='error'){if(stopped)return;for(const id of ['notice','drawer-notice']){const n=$(id);n.textContent=text;n.className='banner '+kind;n.classList.toggle('hidden',!text)}}
 let engineFailureSignature = '', engineDiagnosticText = '';
 function paintEngineFailure(s) {
  const diagnostic = s.engine_diagnostic || (s.engine_error ? {title:'网易引擎不可用',reason:s.engine_error,steps:['关闭程序后重新启动；如果仍失败，复制诊断信息以进一步定位。']} : null);
@@ -135,13 +135,13 @@ async function api(path,data,method='POST') {
   return d;
 }
 function selectedAccountReady(){const a=(state.accounts||[]).find(a=>a.key===$('account').value);return !!a}
-function controls(){const ready=selectedAccountReady();$('query-files').disabled=!ready||busy;$('refresh-accounts').disabled=(!state.logged_in&&!state.has_accounts)||busy;$('account').disabled=!(state.accounts||[]).length||busy;$('logout').disabled=!state.logged_in||!state.engine_ready||busy;$('refresh-qr').disabled=!state.engine_ready||state.logged_in||qrLoading;$('poll-login').disabled=!qrLoaded||state.logged_in||polling;$('fetch-file').disabled=!ready||busy||!browseSnapshot||!selected||selected.directory;$('export-results').disabled=!state.has_result||busy;$('back-dir').disabled=!historyDirs.length||busy;davControls();quarkControls()}
-function paintStatus(s){state=s;$('engine-dot').classList.toggle('ready',!!s.engine_ready);$('engine-label').textContent=s.engine_ready?'原版引擎就绪':'引擎启动中';$('footer-state').textContent=s.stage||'';$('version-label').textContent=s.version||'—';$('login-state').textContent=s.stage||'';$('login-badge').textContent=s.logged_in?'已登录':'未登录';$('login-qr').classList.toggle('hidden',!!s.logged_in);$('login-done').classList.toggle('hidden',!s.logged_in);$('logged-user').textContent=s.user||'';$('event-log').textContent=(s.events||[]).join('\n')||'等待原版引擎初始化…';paintDAV(s.webdav||{});paintWebLogin();paintMobileLogin();paintTransfers(s.webdav||{});paintConsoleStatus(s);paintQuarkStatus(s);pollRunLog(s.run_log||{});
+function controls(){const ready=selectedAccountReady();$('query-files').disabled=!ready||busy;$('refresh-accounts').disabled=(!state.logged_in&&!state.has_accounts)||busy;$('account').disabled=!(state.accounts||[]).length||busy;$('logout').disabled=!state.logged_in||!state.engine_ready||busy;$('refresh-qr').disabled=!state.engine_ready||state.logged_in||qrLoading;$('poll-login').disabled=!qrLoaded||state.logged_in||polling;$('fetch-file').disabled=!ready||busy||!browseSnapshot||!selected||selected.directory;$('export-results').disabled=!state.has_result||busy;$('back-dir').disabled=!historyDirs.length||busy;davControls();quarkControls();if(stopped)document.querySelectorAll('button,input,select,textarea').forEach(control=>control.disabled=true)}
+function paintStatus(s,closing=false){if(stopped&&!closing)return;state=s;$('engine-dot').classList.toggle('ready',!!s.engine_ready);$('engine-label').textContent=s.engine_ready?'原版引擎就绪':'引擎启动中';$('footer-state').textContent=s.stage||'';$('version-label').textContent=s.version||'—';$('login-state').textContent=s.stage||'';$('login-badge').textContent=s.logged_in?'已登录':'未登录';$('login-qr').classList.toggle('hidden',!!s.logged_in);$('login-done').classList.toggle('hidden',!s.logged_in);$('logged-user').textContent=s.user||'';$('event-log').textContent=(s.events||[]).join('\n')||'等待原版引擎初始化…';paintDAV(s.webdav||{});paintWebLogin();paintMobileLogin();paintTransfers(s.webdav||{});paintConsoleStatus(s);paintQuarkStatus(s);if(!stopped)pollRunLog(s.run_log||{});
  const a=$('account'),old=a.value,next=s.accounts||[];if(a.options.length!==next.length||Array.from(a.options).some((o,i)=>!next[i]||next[i].key!==o.value)){a.replaceChildren();if(!next.length){a.add(new Option(s.logged_in?'未发现已绑定的移动/联通云盘':'登录后选择',''))}else{next.forEach(x=>a.add(new Option(x.name,x.key)));if(next.some(x=>x.key===old))a.value=old;accountChanged()}}
  paintEngineFailure(s);
  controls();if($('login-drawer').open&&activeLogin==='netease'&&s.engine_ready&&!s.logged_in&&!qrTried&&!qrLoading)refreshQR();
 }
-async function status(){if(stopped)return;try{paintStatus(await api('status',null,'GET'))}catch(e){$('footer-state').textContent='本地服务已断开；重新启动工具后刷新页面。'}}
+async function status(){if(stopped)return;try{paintStatus(await api('status',null,'GET'))}catch(e){if(!stopped)$('footer-state').textContent='本地服务已断开；重新启动工具后刷新页面。'}}
 async function refreshQR(){qrTried=true;qrLoading=true;notice('');$('qr-placeholder').classList.remove('hidden');$('qr-placeholder').textContent='正在获取真实登录二维码…';$('qr-image').classList.add('hidden');controls();try{const d=await api('qr');$('qr-image').src=d.image;$('qr-image').classList.remove('hidden');$('qr-placeholder').classList.add('hidden');qrLoaded=true;await status()}catch(e){notice(e.message);$('qr-placeholder').textContent='二维码获取失败，可点击刷新重试。'}finally{qrLoading=false;controls()}}
 $('refresh-qr').onclick=refreshQR;
 async function poll(force=false){if(stopped||!state.engine_ready||polling||busy||!qrLoaded||state.logged_in)return;if(!force&&Date.now()-lastPoll<(state.poll_after_seconds||2)*1000)return;lastPoll=Date.now();polling=true;try{paintStatus(await api('poll'))}catch(e){notice(e.message)}finally{polling=false;controls()}}
@@ -163,7 +163,19 @@ async function getDownload(path,name){const r=await fetch('/api/'+path,{headers:
 async function downloadSelected(allowCurrent=false){if(!selected||!browseSnapshot){notice('请重新查询目录后选择文件。');return}busy=true;controls();notice('');$('download-status').textContent='正在下载指定文件…';try{const d=await api('fetch',{account:browseAccount,directory:browseDirectory,snapshot:browseSnapshot,allow_current:allowCurrent,id:selected.id,fid:selected.fid||'',name:$('save-name').value||selected.name});await getDownload('download/'+d.download_key,d.receipt.file);$('download-status').textContent='完成 · '+d.receipt.bytes+' 字节';notice((d.version_verified?'已下载并核验所选版本。':'已按你的确认下载当前内容（通道未提供强版本）。')+'SHA-256：'+d.receipt.sha256,'success');await status()}catch(e){if(!allowCurrent&&e.data&&e.data.code==='version_unavailable'&&confirm(e.message+'。是否下载请求时的当前内容？')){await downloadSelected(true);return}$('download-status').textContent='下载失败';notice(e.message)}finally{busy=false;controls()}}
 $('fetch-file').onclick=()=>downloadSelected(false);
 $('export-results').onclick=()=>getDownload('export','cloudprobe-diagnostics.zip').catch(e=>notice(e.message));
-$('quit').onclick=async()=>{try{await api('quit');stopped=true;qrLoaded=false;notice('测试工具已关闭。可以关闭本页。','success');state.engine_ready=false;state.logged_in=false;$('engine-label').textContent='已关闭';$('engine-dot').classList.remove('ready');$('footer-state').textContent='后台已停止';controls()}catch(e){notice(e.message)}};
+$('quit').onclick=async()=>{
+ try {
+  await api('quit');
+  notice('程序已关闭。可以关闭本页。','success');
+  if(busy){$('query-status').textContent='操作已随程序退出而取消。';$('download-status').textContent='操作已随程序退出而取消。';$('query-status').classList.remove('busy');}
+  busy=false;
+  stopped=true;qrLoaded=false;listGeneration++;
+  const closedLogin={running:false,stage:'程序已关闭'};
+  paintStatus({...state,engine_ready:false,logged_in:false,engine_error:'',engine_diagnostic:null,stage:'后台已停止',webdav:{...(state.webdav||{}),running:false},quark:closedLogin,wopan_web_login:closedLogin,mobile_web_login:closedLogin},true);
+  $('engine-label').textContent='已关闭';
+  controls();
+ } catch(e) { notice(e.message); }
+};
 let davFormReady=false,davAccountKeys='',davRows=[];
 let davWriteWarningSignature='';
 function paintDAVWriteWarnings(d) {

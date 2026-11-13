@@ -268,7 +268,7 @@ func (b *OriginalBridge) exchange(command *bridgeCommand) (BridgeReply, error) {
 	case r := <-ch:
 		if !r.OK {
 			if r.NotExecuted {
-				return r, &davNotExecuted{errors.New(r.Error)}
+				return r, &davNotExecuted{&bridgeResponseError{Code: r.Code, Message: r.Error}}
 			}
 			if r.ResultUnknown {
 				b.kill()

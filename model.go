@@ -52,14 +52,16 @@ type Page struct {
 type StageError struct {
 	Stage   string
 	Message string
+	Err     error
 }
 
 func (e *StageError) Error() string { return e.Stage + "：" + e.Message }
+func (e *StageError) Unwrap() error { return e.Err }
 func stage(s string, e error) error {
 	if e == nil {
 		return nil
 	}
-	return &StageError{s, e.Error()}
+	return &StageError{Stage: s, Message: e.Error(), Err: e}
 }
 func newReport(provider, mode, dir string) Report {
 	return Report{Version: version, Time: time.Now().Format(time.RFC3339), Provider: provider, Mode: mode, Directory: dir, Items: []Item{}, Notes: []string{"显示原始列表中被工具识别的条目；字幕候选仅模拟后缀筛选，不含同名匹配和服务端智能匹配。", "未返回不等于无权限或文件不存在；判断必须结合分页、错误和目录范围。", "本工具不会在列目录时下载文件正文。"}}

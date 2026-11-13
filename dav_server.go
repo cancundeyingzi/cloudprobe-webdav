@@ -523,10 +523,7 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if (r.Method == "GET" || r.Method == "HEAD") && davNeedsFreshRead(r) {
-		if err := s.fs.refreshReadPath(r.Context(), strings.TrimPrefix(r.URL.Path, "/dav")); err != nil {
-			s.handler.ServeHTTP(rw, r)
-			return
-		}
+		r = r.WithContext(s.fs.freshReadContext(r.Context()))
 	}
 	if r.Method == "PUT" {
 		r.Body = &davBody{ReadCloser: http.MaxBytesReader(rw, r.Body, s.fs.maxUpload), state: state, ctx: logCtx}
@@ -757,7 +754,9 @@ func (g *guiApp) davAPI(w http.ResponseWriter, r *http.Request) {
 		g.fail(w, e)
 		return
 	}
-	g.op.Lock()
+	if !g.lockOperation(w, r) {
+		return
+	}
 	defer g.op.Unlock()
 	out, e := g.dav.Start(r.Context(), in)
 	if e != nil {

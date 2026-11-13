@@ -409,7 +409,9 @@ func (g *guiApp) quarkAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	action := strings.TrimPrefix(r.URL.Path, "/api/quark/")
 	if action != "quota" && action != "cancel" {
-		g.op.Lock()
+		if !g.lockOperation(w, r) {
+			return
+		}
 		defer g.op.Unlock()
 	}
 	if action == "remove" && g.dav.Status()["running"] == true {

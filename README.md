@@ -50,6 +50,8 @@ go build -mod=vendor -trimpath -o CloudProbe.exe .
 
 本轮审查修补的行为限制、资源预算和验证说明见 [发布审查修补说明](docs/发布审查修补说明.md)。Windows 凭据使用 DPAPI；其他平台目前仅使用私有文件权限保护，尚未提供凭据加密。
 
+条件读取、并发地址刷新、业务错误分类、退出取消和目录缓存回收的后续修复见 [代码复查与修复记录](docs/代码复查修复-2026-11-13.md)。
+
 GUI 登录桥接还需要 Windows x64 与 .NET 8。出于本地部署和账号安全，原版 SDK 二进制不放在 GitHub 仓库中。取得可用 SDK 后生成桥接组件：
 
 ```powershell

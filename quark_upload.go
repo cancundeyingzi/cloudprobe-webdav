@@ -517,14 +517,7 @@ func (u *quarkUpload) part(ctx context.Context, source io.ReaderAt, index, parts
 			return "", err
 		}
 		delay := min(time.Duration(attempt)*5*time.Second, 30*time.Second)
-		var h *upstreamHTTPError
-		if errors.As(err, &h) {
-			delay = max(delay, h.after)
-		}
-		var api *quarkAPIError
-		if errors.As(err, &api) {
-			delay = max(delay, api.After)
-		}
+		delay = max(delay, transferRetryAfter(err))
 		logDAV(ctx, runLogEntry{Operation: "夸克上传故障重试", Source: u.route.label(), Result: "等待重试", Part: index, Parts: parts, Attempt: attempt, Detail: fmt.Sprintf("保留同一 task/upload 会话；等待 %d ms；次数无上限", delay.Milliseconds())})
 		if err = u.drive.retryWait(ctx, delay); err != nil {
 			return "", err

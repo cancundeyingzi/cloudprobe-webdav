@@ -104,9 +104,15 @@ func guiFetchRedundant(ctx context.Context, drive davDrive, runtime *transferRun
 			return receipt, fmt.Errorf("下载正文与所选目录快照的内容版本不符，请刷新后重试")
 		}
 	}
+	if err = ctx.Err(); err != nil {
+		return receipt, err
+	}
 	err = f.Sync()
 	if err == nil && len(validate) > 0 {
 		err = validate[0]()
+	}
+	if err == nil {
+		err = ctx.Err()
 	}
 	return receipt, err
 }

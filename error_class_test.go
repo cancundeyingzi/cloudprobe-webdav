@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -27,6 +28,10 @@ func TestTransferErrorClassificationUsesStructuredEvidence(t *testing.T) {
 		{"sdk message", &wopan.ResponseError{Message: "token expired"}, true, true},
 		{"proxy code", &apiBusinessError{Code: "9999"}, true, true},
 		{"bridge code", &bridgeResponseError{Code: 10011}, true, true},
+		{"bridge not executed", &davNotExecuted{&bridgeResponseError{Code: 10011}}, true, true},
+		{"stage business code", stage("响应解析", &apiBusinessError{Code: "9999"}), true, true},
+		{"quark business auth", &quarkAPIError{HTTP: 200, Code: "31001", Auth: true}, false, true},
+		{"quark permanent business rejection", &quarkAPIError{HTTP: 200, Code: "FILE_NOT_FOUND"}, false, false},
 		{"permission", &apiHTTPError{Code: 403, Err: errors.New("denied")}, false, true},
 		{"server", &upstreamHTTPError{code: 503}, false, true},
 		{"not found", &upstreamHTTPError{code: 404}, false, false},
@@ -42,6 +47,16 @@ func TestTransferErrorClassificationUsesStructuredEvidence(t *testing.T) {
 				t.Fatalf("retry=%v, want %v", got, test.retry)
 			}
 		})
+	}
+}
+
+func TestClientRequestPreservesNetworkFailureThroughStage(t *testing.T) {
+	cause := &net.DNSError{Err: "temporary network failure", Name: "fixture.invalid", IsTemporary: true}
+	client := &Client{cfg: defaultConfig("wopan"), redact: &Redactor{}, http: &http.Client{Transport: protocolRoundTripper(func(*http.Request) (*http.Response, error) { return nil, cause })}}
+	client.cfg.Transport = "plain"
+	_, err := client.request(context.Background(), "GET", "/fixture", nil, nil, nil)
+	if !errors.Is(err, cause) || !retryableTransfer(err) {
+		t.Fatalf("network cause lost in stage wrapper: %v", err)
 	}
 }
 

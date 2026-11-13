@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	wopan "github.com/OpenListTeam/wopan-sdk-go"
 )
@@ -19,6 +20,13 @@ type bridgeResponseError struct {
 func (e *bridgeResponseError) Error() string { return e.Message }
 
 func transferHTTPStatus(err error) int {
+	var openList *openListResponseError
+	if errors.As(err, &openList) {
+		if openList.HTTP.Code >= 200 && openList.HTTP.Code < 300 && openList.BusinessCode >= 400 && openList.BusinessCode <= 599 {
+			return int(openList.BusinessCode)
+		}
+		return openList.HTTP.Code
+	}
 	var upstream *upstreamHTTPError
 	var api *apiHTTPError
 	var sdk *wopan.ResponseError
@@ -32,6 +40,21 @@ func transferHTTPStatus(err error) int {
 		return sdk.HTTPStatus
 	case errors.As(err, &quark):
 		return quark.HTTP
+	}
+	return 0
+}
+
+func transferRetryAfter(err error) time.Duration {
+	var upstream *upstreamHTTPError
+	var openList *openListResponseError
+	var quark *quarkAPIError
+	switch {
+	case errors.As(err, &upstream):
+		return upstream.after
+	case errors.As(err, &openList):
+		return openList.After
+	case errors.As(err, &quark):
+		return quark.After
 	}
 	return 0
 }
@@ -65,15 +88,19 @@ func retryableTransfer(err error) bool {
 	if errors.As(err, &denied) {
 		return false
 	}
+	var quark *quarkAPIError
+	if errors.As(err, &quark) {
+		return quark.Auth || retryableHTTP(quark.HTTP)
+	}
+	var openList *openListResponseError
+	if errors.As(err, &openList) {
+		return retryableHTTP(transferHTTPStatus(openList))
+	}
 	if wopanAuthError(err) {
 		return true
 	}
 	if status := transferHTTPStatus(err); status != 0 {
 		return retryableHTTP(status)
-	}
-	var quark *quarkAPIError
-	if errors.As(err, &quark) {
-		return quark.Auth
 	}
 	var network net.Error
 	return errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)

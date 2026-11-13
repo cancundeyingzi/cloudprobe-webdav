@@ -171,19 +171,27 @@ func (d *mobileDAVDrive) ReadRoutes(ctx context.Context, it davEntry) []readRout
 }
 
 type resolvedReadRoute struct {
-	denials forbiddenRetries
-	route   readRoute
-	mu      sync.Mutex
-	target  readTarget
-	until   time.Time
+	denials          forbiddenRetries
+	route            readRoute
+	mu               contextMutex
+	target           readTarget
+	until            time.Time
+	generation       uint64
+	failedGeneration uint64
 }
 
-func (r *resolvedReadRoute) get(ctx context.Context) (readTarget, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.target.URL != "" && time.Now().Before(r.until) {
-		return r.target, nil
+func (r *resolvedReadRoute) get(ctx context.Context) (readTarget, uint64, error) {
+	if err := r.mu.LockContext(ctx); err != nil {
+		return readTarget{}, 0, err
 	}
+	defer r.mu.Unlock()
+	if err := r.denials.stopped(); err != nil {
+		return readTarget{}, r.generation, err
+	}
+	if r.target.URL != "" && time.Now().Before(r.until) {
+		return r.target, r.generation, nil
+	}
+	r.generation++
 	t, e := r.route.Resolve(ctx)
 	if e == nil {
 		e = validDAVURL(t.URL)
@@ -191,13 +199,40 @@ func (r *resolvedReadRoute) get(ctx context.Context) (readTarget, error) {
 	if e == nil {
 		r.target, r.until = t, time.Now().Add(30*time.Second)
 	}
-	return t, e
+	return t, r.generation, e
 }
-func (r *resolvedReadRoute) invalidate() {
+func (r *resolvedReadRoute) invalidate(generation uint64) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if generation != r.generation {
+		return
+	}
 	r.target = readTarget{}
 	r.until = time.Time{}
-	r.mu.Unlock()
+}
+
+// A batch of requests sharing one address counts as one failed refresh round.
+// Late responses may not invalidate or penalize a newer address.
+func (r *resolvedReadRoute) failure(generation uint64, err error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if terminal := r.denials.stopped(); terminal != nil {
+		return terminal
+	}
+	if generation != r.generation || r.failedGeneration == generation {
+		return err
+	}
+	r.failedGeneration = generation
+	r.target, r.until = readTarget{}, time.Time{}
+	return r.denials.failure(err)
+}
+
+func (r *resolvedReadRoute) succeeded(generation uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if generation == r.generation {
+		r.denials.failure(nil)
+	}
 }
 
 type downloadSignature struct {

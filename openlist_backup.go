@@ -40,6 +40,17 @@ type openListClient struct {
 	budget *fairLimiter
 }
 
+// OpenList reports HTTP-like business codes even when the HTTP response is 200.
+// Keep that interpretation local to OpenList; other providers have different codes.
+type openListResponseError struct {
+	HTTP         *apiHTTPError
+	BusinessCode int64
+	After        time.Duration
+}
+
+func (e *openListResponseError) Error() string { return e.HTTP.Error() }
+func (e *openListResponseError) Unwrap() error { return e.HTTP }
+
 func nonnegativeInteger(v any) (int64, error) {
 	switch x := v.(type) {
 	case float64:
@@ -115,12 +126,15 @@ func (c *openListClient) call(ctx context.Context, method, endpoint string, inpu
 	}
 	var result map[string]any
 	if e = json.Unmarshal(raw, &result); e != nil {
-		return nil, errors.New("OpenList 未返回有效 JSON")
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil, errors.New("OpenList 未返回有效 JSON")
+		}
+		result = map[string]any{"message": "OpenList 未返回有效 JSON"}
 	}
 	code := number(result["code"])
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || code != 200 {
 		failure := &apiBusinessError{Code: fmt.Sprint(code), Message: valueString(result["message"])}
-		return nil, &apiHTTPError{Code: resp.StatusCode, Err: fmt.Errorf("OpenList HTTP %d / %w", resp.StatusCode, failure)}
+		return nil, &openListResponseError{HTTP: &apiHTTPError{Code: resp.StatusCode, Err: fmt.Errorf("OpenList HTTP %d / %w", resp.StatusCode, failure)}, BusinessCode: code, After: retryAfterHeader(resp.Header)}
 	}
 	return object(result["data"]), nil
 }
