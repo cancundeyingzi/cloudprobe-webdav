@@ -27,16 +27,13 @@ func TestGUIRejectsWrongHostOriginAndMissingNonce(t *testing.T) {
 	}
 }
 
-func TestGUIRootBootstrapsCurrentLocalSession(t *testing.T) {
+func TestGUIRootDoesNotExposeCurrentLocalSession(t *testing.T) {
 	app := &guiApp{host: "127.0.0.1:12345", nonce: "current-local-session"}
 	r := httptest.NewRequest("GET", "http://"+app.host+"/", nil)
 	w := httptest.NewRecorder()
 	app.ServeHTTP(w, r)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `name="cloudprobe-ui-session" content="current-local-session"`) {
-		t.Fatal("bare local address did not bootstrap its current session")
-	}
-	if strings.Contains(w.Body.String(), "__CLOUDPROBE_UI_NONCE__") {
-		t.Fatal("session marker was not replaced")
+	if w.Code != 200 || strings.Contains(w.Body.String(), app.nonce) || strings.Contains(w.Body.String(), "__CLOUDPROBE_UI_NONCE__") {
+		t.Fatal("unauthenticated HTML exposed session data")
 	}
 	r = httptest.NewRequest("GET", "http://"+app.host+"/", nil)
 	r.Header.Set("Origin", "https://untrusted.example")

@@ -385,7 +385,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" && r.Method == "GET" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
-		_, _ = w.Write([]byte(strings.ReplaceAll(string(guiHTML), "__CLOUDPROBE_UI_NONCE__", g.nonce)))
+		_, _ = w.Write(guiHTML)
 		return
 	}
 	if !strings.HasPrefix(r.URL.Path, "/api/") {
@@ -422,7 +422,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CloudProbe-UI")), []byte(g.nonce)) != 1 {
-		http.Error(w, "请从程序打开的界面访问", 403)
+		http.Error(w, "界面会话已失效，请重新运行 cloudprobe.exe 打开管理界面", 403)
 		return
 	}
 	if r.URL.Path == "/api/status" && r.Method == "GET" {
@@ -736,6 +736,20 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	if e != nil {
 		return 1, e
 	}
+	instance, existing, e := claimGUIInstance(parent, *data)
+	if e != nil {
+		return 1, e
+	}
+	if existing != "" {
+		fmt.Fprintln(w, "GUI_URL="+existing)
+		if !*noOpen {
+			if e := openLocalBrowser(existing); e != nil {
+				fmt.Fprintln(w, "请手动打开上面的本机地址")
+			}
+		}
+		return 0, nil
+	}
+	defer instance.Close()
 	// Native SDK/browser helpers inherit a temporary directory inside the app.
 	tmp := filepath.Join(*data, "temp")
 	if e = os.MkdirAll(tmp, 0700); e != nil {
@@ -752,6 +766,7 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	if e != nil {
 		return 1, e
 	}
+	defer listener.Close()
 	app := &guiApp{stage: "正在启动原版引擎", accounts: map[string]guiAccount{}, downloads: map[string]guiDownload{}, data: *data, nonce: randomKey(), host: listener.Addr().String(), shutdown: cancel}
 	if e = cleanupLegacyLockStripes(filepath.Join(*data, "webdav-spool", "resume")); e != nil {
 		return 1, e
@@ -798,6 +813,9 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		app.restore(ctx)
 	}()
 	address := "http://" + app.host + "/#" + app.nonce
+	if e := instance.publish(address); e != nil {
+		return 1, e
+	}
 	fmt.Fprintln(w, "GUI_URL="+address)
 	if !*noOpen {
 		if e = openLocalBrowser(address); e != nil {

@@ -1,4 +1,11 @@
-const $=id=>document.getElementById(id);const storageKey='cloudprobe-ui-'+location.port;let nonce=document.querySelector('meta[name="cloudprobe-ui-session"]').content||location.hash.slice(1)||sessionStorage.getItem(storageKey)||'';if(nonce)sessionStorage.setItem(storageKey,nonce);if(location.hash)history.replaceState(null,'',location.pathname);
+const $=id=>document.getElementById(id);
+const storageKey='cloudprobe-ui-'+location.port;
+let nonce=location.hash.slice(1);
+try {
+  if(nonce) localStorage.setItem(storageKey,nonce);
+  else nonce=localStorage.getItem(storageKey)||'';
+} catch {}
+if(location.hash)history.replaceState(null,'',location.pathname);
 let state={},qrLoaded=false,qrTried=false,qrLoading=false,polling=false,busy=false,stopped=false,lastPoll=0,report=null,selected=null,view='all',historyDirs=[],currentDir='',currentAccount='';
 const titles = {
   login:['账号与登录','各云盘独立登录，同一账号的多种授权自动合并为备用渠道。','连接与授权'],
