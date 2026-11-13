@@ -210,13 +210,13 @@ func TestMaintenanceConfirmedRejectionDoesNotUseOpenListForWrites(t *testing.T) 
 
 func TestMaintenanceExecutionStageControlsReplay(t *testing.T) {
 	denied := &davNotExecuted{errors.New("explicit rejection")}
-	if !safePreexecutionFailure(denied) {
+	if !channelMayRetry(denied) {
 		t.Fatal("explicit pre-execution rejection lost fallback")
 	}
-	if safePreexecutionFailure(&davMutationError{Phase: "second RPC", Partial: true, Err: denied}) {
+	if channelMayRetry(&davMutationError{Phase: "second RPC", Partial: true, Err: denied}) {
 		t.Fatal("partial state inherited nested replay permission")
 	}
-	if safePreexecutionFailure(errors.New("post-write check mentions HTTP 403 and 500020001")) {
+	if channelMayRetry(errors.New("post-write check mentions HTTP 403 and 500020001")) {
 		t.Fatal("error text granted replay permission")
 	}
 	if confirmedMutationRejection(&apiBusinessError{Code: "500020001", Message: "unknown provider code"}) {
@@ -293,7 +293,7 @@ func TestMaintenanceMobilePartialMoveCannotReplay(t *testing.T) {
 	d := &mobileDAVDrive{originalDAVDrive: originalDAVDrive{client: cl}}
 	e := d.Move(context.Background(), davEntry{Item: Item{ID: "f", Name: "old.txt"}}, "dest", "new.txt")
 	var partial *davMutationError
-	if calls.Load() != 2 || !errors.As(e, &partial) || !partial.Partial || safePreexecutionFailure(e) {
+	if calls.Load() != 2 || !errors.As(e, &partial) || !partial.Partial || channelMayRetry(e) {
 		t.Fatal("mobile partial rename/move incorrectly permits replay", calls.Load(), e)
 	}
 }

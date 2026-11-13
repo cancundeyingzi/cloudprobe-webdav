@@ -126,7 +126,14 @@ $('engine-copy-diagnostic').onclick=async()=>{
  try {await navigator.clipboard.writeText(engineDiagnosticText);$('engine-copy-status').textContent='诊断信息已复制';}
  catch { $('engine-failure-details').open=true;$('engine-copy-status').textContent='复制失败，请在展开的详情中手动选择复制。'; }
 };
-async function api(path,data,method='POST'){const r=await fetch('/api/'+path,{method,headers:{'X-CloudProbe-UI':nonce,...(method==='POST'?{'Content-Type':'application/json'}:{})},...(method==='POST'?{body:JSON.stringify(data||{})}:{})});let d;try{d=await r.json()}catch{throw new Error(await r.text().catch(()=> '本地服务连接异常'))}if(!r.ok){const e=new Error(d.error||'请求失败');e.data=d;throw e}return d}
+async function api(path,data,method='POST') {
+  const r=await fetch('/api/'+path,{method,headers:{'X-CloudProbe-UI':nonce,...(method==='POST'?{'Content-Type':'application/json'}:{})},...(method==='POST'?{body:JSON.stringify(data||{})}:{})});
+  const text=await r.text();
+  let d;
+  try { d=JSON.parse(text); } catch { throw new Error(text.trim()||'本地服务连接异常'); }
+  if(!r.ok){const e=new Error(d.error||'请求失败');e.data=d;throw e;}
+  return d;
+}
 function selectedAccountReady(){const a=(state.accounts||[]).find(a=>a.key===$('account').value);return !!a}
 function controls(){const ready=selectedAccountReady();$('query-files').disabled=!ready||busy;$('refresh-accounts').disabled=(!state.logged_in&&!state.has_accounts)||busy;$('account').disabled=!(state.accounts||[]).length||busy;$('logout').disabled=!state.logged_in||!state.engine_ready||busy;$('refresh-qr').disabled=!state.engine_ready||state.logged_in||qrLoading;$('poll-login').disabled=!qrLoaded||state.logged_in||polling;$('fetch-file').disabled=!ready||busy||!browseSnapshot||!selected||selected.directory;$('export-results').disabled=!state.has_result||busy;$('back-dir').disabled=!historyDirs.length||busy;davControls();quarkControls()}
 function paintStatus(s){state=s;$('engine-dot').classList.toggle('ready',!!s.engine_ready);$('engine-label').textContent=s.engine_ready?'原版引擎就绪':'引擎启动中';$('footer-state').textContent=s.stage||'';$('version-label').textContent=s.version||'—';$('login-state').textContent=s.stage||'';$('login-badge').textContent=s.logged_in?'已登录':'未登录';$('login-qr').classList.toggle('hidden',!!s.logged_in);$('login-done').classList.toggle('hidden',!s.logged_in);$('logged-user').textContent=s.user||'';$('event-log').textContent=(s.events||[]).join('\n')||'等待原版引擎初始化…';paintDAV(s.webdav||{});paintWebLogin();paintMobileLogin();paintTransfers(s.webdav||{});paintConsoleStatus(s);paintQuarkStatus(s);pollRunLog(s.run_log||{});

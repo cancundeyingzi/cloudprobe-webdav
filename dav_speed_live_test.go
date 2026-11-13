@@ -76,7 +76,7 @@ func TestLiveWopanUploadConcurrencyBenchmark(t *testing.T) {
 	salt := []byte(randomKey()[:16])
 	hash, _ := pbkdf2.Key(sha256.New, password, salt, 100000, 32)
 	mgr := &davManager{app: g}
-	svc := &davService{manager: mgr, fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "benchmark", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash), slots: make(chan struct{}, 8)}
+	svc := &davService{manager: mgr, fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "benchmark", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash)}
 	server := httptest.NewServer(svc)
 	defer server.Close()
 	client := &http.Client{Timeout: 6 * time.Minute}

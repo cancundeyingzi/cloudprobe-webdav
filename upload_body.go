@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"sync"
-	"time"
 )
 
 type contextualReaderAt interface {
@@ -41,12 +40,6 @@ func newUploadBody(ctx context.Context, makeReader func(context.Context) io.Read
 	return &uploadBody{reader: makeReader(readCtx), cancel: cancel}
 }
 
-func uploadAttemptContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout > 0 {
-		return context.WithTimeout(ctx, timeout)
-	}
-	return context.WithCancel(ctx)
-}
 func (b *uploadBody) Read(p []byte) (int, error) {
 	b.mu.Lock()
 	if b.closed {

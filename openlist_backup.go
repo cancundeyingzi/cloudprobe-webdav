@@ -345,20 +345,6 @@ func (b *backupDAVDrive) URL(ctx context.Context, it davEntry) (string, error) {
 	}
 	return "", last
 }
-func safePreexecutionFailure(e error) bool {
-	if e == nil {
-		return false
-	}
-	var outcome *davMutationError
-	if errors.As(e, &outcome) {
-		return false
-	}
-	var notExecuted *davNotExecuted
-	if errors.As(e, &notExecuted) {
-		return true
-	}
-	return false
-}
 
 // OpenList path IDs cannot prove object identity after a rename. All mutations
 // use the native driver, including after an explicit native rejection.

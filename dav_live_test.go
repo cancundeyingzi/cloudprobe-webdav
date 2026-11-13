@@ -203,7 +203,7 @@ func TestLiveWebDAVWopanCRUD(t *testing.T) {
 	drive.uploadPartMiB = 5
 	salt := []byte("1234567890123456")
 	hash, _ := pbkdf2.Key(sha256.New, "test-password-123", salt, 100000, 32)
-	h := &davService{fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "tester", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash), slots: make(chan struct{}, 4)}
+	h := &davService{fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "tester", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash)}
 	server := httptest.NewServer(h)
 	defer server.Close()
 	checks := []string{}

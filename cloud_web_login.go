@@ -70,6 +70,9 @@ func (l *cloudWebLogin) Start(_ string) error {
 		if err == nil {
 			err = l.captureBrowser(ctx, browser, provider)
 			browser.Close()
+			if browser.cleanupError != nil {
+				l.app.event("登录窗口资料清理未完成，下次启动重试：" + browser.cleanupError.Error())
+			}
 		}
 		l.mu.Lock()
 		defer l.mu.Unlock()

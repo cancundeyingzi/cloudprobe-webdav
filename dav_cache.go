@@ -15,24 +15,26 @@ type davDirCache struct {
 	epochs  map[string]uint64
 }
 
-func (c *davDirCache) get(alias, dir string) ([]davEntry, uint64, bool) {
+func (c *davDirCache) get(mount *davMount, dir string) ([]davEntry, uint64, bool) {
+	alias := mount.Alias
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[alias+"\x00"+dir]
-	if !ok || !time.Now().Before(entry.until) {
+	if !ok || entry.mount != mount || !time.Now().Before(entry.until) {
 		return nil, c.epochs[alias], false
 	}
 	return entry.entries, c.epochs[alias], true
 }
 
-func (c *davDirCache) put(alias, dir string, entries []davEntry, epoch uint64) {
+func (c *davDirCache) put(mount *davMount, dir string, entries []davEntry, epoch uint64) {
+	alias := mount.Alias
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = map[string]davCache{}
 	}
 	if c.epochs[alias] == epoch {
-		c.entries[alias+"\x00"+dir] = davCache{entries: entries, until: time.Now().Add(3 * time.Second)}
+		c.entries[alias+"\x00"+dir] = davCache{mount: mount, entries: entries, until: time.Now().Add(3 * time.Second)}
 	}
 }
 
@@ -67,7 +69,7 @@ func (c *davDirCache) invalidatePath(name string) {
 }
 
 func (f *davFS) listing(ctx context.Context, m *davMount, dir string) ([]davEntry, error) {
-	entries, epoch, ok := f.dirCache.get(m.Alias, dir)
+	entries, epoch, ok := f.dirCache.get(m, dir)
 	if ok {
 		logDAV(ctx, runLogEntry{Operation: "读取目录", Source: "本机目录缓存", Result: "命中", Count: len(entries), Detail: "缓存有效期 3 秒；本次未请求网盘接口"})
 		return entries, nil
@@ -81,7 +83,7 @@ func (f *davFS) listing(ctx context.Context, m *davMount, dir string) ([]davEntr
 			return nil, davCloudError(ctx, errors.New("云盘返回了缺少名称、ID 或含路径分隔符的条目，停止映射目录"))
 		}
 	}
-	f.dirCache.put(m.Alias, dir, entries, epoch)
+	f.dirCache.put(m, dir, entries, epoch)
 	return entries, nil
 }
 

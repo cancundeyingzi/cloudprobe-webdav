@@ -82,7 +82,7 @@ func retryableTransfer(err error) bool {
 type persistentForbiddenError struct{ Err error }
 
 func (e *persistentForbiddenError) Error() string {
-	return fmt.Sprintf("刷新授权或传输地址后连续 5 次被拒绝（HTTP 403），请求已停止；请检查云盘权限或重新登录后重试：%v", e.Err)
+	return fmt.Sprintf("同一传输通道连续 5 次被拒绝（HTTP 403），请求已停止；请检查云盘权限或重新登录后重试：%v", e.Err)
 }
 func (e *persistentForbiddenError) Unwrap() error { return e.Err }
 

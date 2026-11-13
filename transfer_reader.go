@@ -172,6 +172,7 @@ func (s *downloadSession) open(ctx context.Context, start, end int64, ranged boo
 				}
 				if e == nil {
 					s.mu.Lock()
+					route.denials.failure(nil)
 					s.preferred = index
 					s.mu.Unlock()
 					s.health.good(route.route.Name)

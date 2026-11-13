@@ -98,7 +98,7 @@ func TestLiveWopanTransportAndConcurrentOperations(t *testing.T) {
 	password := randomKey()
 	salt := []byte(randomKey()[:16])
 	hash, _ := pbkdf2.Key(sha256.New, password, salt, 100000, 32)
-	svc := &davService{manager: &davManager{app: g}, fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "transport-test", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash), slots: make(chan struct{}, 8)}
+	svc := &davService{manager: &davManager{app: g}, fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "transport-test", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash)}
 	server := httptest.NewServer(svc)
 	defer server.Close()
 	client := &http.Client{Timeout: 13 * time.Minute}

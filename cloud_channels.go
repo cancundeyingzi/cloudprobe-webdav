@@ -141,6 +141,10 @@ func (d *cloudChannelDrive) URL(ctx context.Context, e davEntry) (string, error)
 	return "", err
 }
 func channelMayRetry(err error) bool {
+	var uncertain *davMutationError
+	if errors.As(err, &uncertain) {
+		return false
+	}
 	var not *davNotExecuted
 	return errors.As(err, &not) || confirmedMutationRejection(err)
 }

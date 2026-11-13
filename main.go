@@ -324,7 +324,7 @@ func demoCommand(ctx context.Context, args []string, w io.Writer) (int, error) {
 	return 0, nil
 }
 
-const help = `CloudProbe 云盘文件测试工具 1.1.1
+const help = `CloudProbe 云盘文件测试工具 ` + version + `
 
 用法：cloudprobe <命令> [参数]（参数必须放在命令之后）
 

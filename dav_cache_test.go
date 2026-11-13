@@ -58,14 +58,18 @@ func TestDAVRangeReadsReuseDirectoriesAndConditionsRefreshTarget(t *testing.T) {
 
 func TestDAVCacheInvalidationIsScopedToMount(t *testing.T) {
 	cache := davDirCache{}
-	cache.put("one", "0", []davEntry{{Item: Item{ID: "a"}}}, 0)
-	cache.put("two", "0", []davEntry{{Item: Item{ID: "b"}}}, 0)
+	one, two := &davMount{Alias: "one"}, &davMount{Alias: "two"}
+	cache.put(one, "0", []davEntry{{Item: Item{ID: "a"}}}, 0)
+	cache.put(two, "0", []davEntry{{Item: Item{ID: "b"}}}, 0)
 	cache.invalidate("one")
-	cache.put("one", "0", nil, 0)
-	if _, _, ok := cache.get("one", "0"); ok {
+	cache.put(one, "0", nil, 0)
+	if _, _, ok := cache.get(one, "0"); ok {
 		t.Fatal("stale response repopulated an invalidated mount")
 	}
-	if _, _, ok := cache.get("two", "0"); !ok {
+	if _, _, ok := cache.get(two, "0"); !ok {
 		t.Fatal("unrelated mount lost its cache")
+	}
+	if _, _, ok := cache.get(&davMount{Alias: "two"}, "0"); ok {
+		t.Fatal("a replacement mount consumed the previous driver's snapshot")
 	}
 }

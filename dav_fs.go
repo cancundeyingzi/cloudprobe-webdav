@@ -32,6 +32,7 @@ type davMount struct {
 	writeWarning      *davWriteWarning
 }
 type davCache struct {
+	mount   *davMount
 	entries []davEntry
 	until   time.Time
 }
@@ -415,17 +416,7 @@ func (f *davFS) OpenFile(ctx context.Context, name string, flag int, perm os.Fil
 	ctx = scopedDAV(ctx, n.mount, clean)
 	df := &davFile{fs: f, ctx: ctx, name: clean, node: n}
 	if !n.entry.Directory {
-		if f.transfers != nil {
-			df.remote = newTransferReader(ctx, n.mount, n.entry, f.transfers)
-		} else {
-			df.remote = &davReader{ctx: ctx, size: n.entry.Size, url: func() (string, error) {
-				u, e := n.mount.drive.URL(ctx, n.entry)
-				if e != nil {
-					return "", davCloudError(ctx, e)
-				}
-				return u, nil
-			}}
-		}
+		df.remote = newTransferReader(ctx, n.mount, n.entry, f.transfers)
 	}
 	return df, nil
 }
@@ -765,140 +756,6 @@ func (f *davFS) finishBackups(ctx context.Context, s *davRequestState, success b
 	}
 	return nil
 }
-
-type davReader struct {
-	ctx       context.Context
-	size, pos int64
-	body      io.ReadCloser
-	url       func() (string, error)
-	started   time.Time
-	readBytes int64
-	host      string
-	readErr   error
-}
-
-func (d *davReader) Close() {
-	if d.body != nil {
-		d.body.Close()
-		d.body = nil
-		e := runLogEntry{Operation: "下载正文", Source: "云盘节点", Endpoint: d.host, Result: "读取结束", Bytes: d.readBytes, DurationMs: time.Since(d.started).Milliseconds(), BytesPerSecond: rateFor(d.readBytes, time.Since(d.started)), Detail: "实际从节点读取的字节数；可能包含客户端探测或分段读取，向客户端发送量另计"}
-		if d.readErr != nil {
-			e.Result, e.Error = "失败", d.readErr.Error()
-		}
-		logDAV(d.ctx, e)
-	}
-}
-func (d *davReader) Seek(off int64, whence int) (int64, error) {
-	var n int64
-	switch whence {
-	case io.SeekStart:
-		n = off
-	case io.SeekCurrent:
-		n = d.pos + off
-	case io.SeekEnd:
-		n = d.size + off
-	default:
-		return 0, os.ErrInvalid
-	}
-	if n < 0 {
-		return 0, os.ErrInvalid
-	}
-	if n != d.pos {
-		d.Close()
-		d.pos = n
-	}
-	return d.pos, nil
-}
-func (d *davReader) Read(p []byte) (n int, err error) {
-	defer func() {
-		if err != nil && err != io.EOF {
-			d.readErr = err
-			if d.body == nil {
-				logDAV(d.ctx, runLogEntry{Operation: "下载正文", Source: "云盘节点", Endpoint: d.host, Result: "失败", Error: err.Error()})
-			}
-		}
-	}()
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if d.pos >= d.size {
-		return 0, io.EOF
-	}
-	if d.body == nil {
-		d.started, d.readBytes, d.readErr = time.Now(), 0, nil
-		for attempt := 0; attempt < 2; attempt++ {
-			u, e := d.url()
-			if e != nil {
-				return 0, e
-			}
-			if e = validDAVURL(u); e != nil {
-				return 0, e
-			}
-			d.host = nodeHost(u)
-			req, e := http.NewRequestWithContext(d.ctx, "GET", u, nil)
-			if e != nil {
-				return 0, e
-			}
-			req.Header.Set("User-Agent", "CloudProbe/"+version)
-			if d.pos > 0 {
-				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", d.pos))
-			}
-			hc := &http.Client{Transport: davDownloadTransport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) > 8 {
-					return errors.New("下载重定向过多")
-				}
-				return validDAVURL(req.URL.String())
-			}}
-			resp, e := hc.Do(req)
-			if e != nil {
-				return 0, e
-			}
-			if (resp.StatusCode == 401 || resp.StatusCode == 403) && attempt == 0 {
-				resp.Body.Close()
-				logDAV(d.ctx, runLogEntry{Operation: "刷新下载地址", Source: "云盘节点", Result: "重试", Endpoint: resp.Request.URL.Host, Detail: fmt.Sprintf("节点 HTTP %d；重新获取下载地址", resp.StatusCode)})
-				continue
-			}
-			if resp.StatusCode != 200 && resp.StatusCode != 206 {
-				resp.Body.Close()
-				return 0, fmt.Errorf("上游下载返回 HTTP %d", resp.StatusCode)
-			}
-			if d.pos > 0 {
-				var start, end, total int64
-				_, e = fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &total)
-				if resp.StatusCode != 206 || e != nil || start != d.pos || total != d.size || end < start {
-					resp.Body.Close()
-					return 0, errors.New("上游未按请求返回正确分段，不能伪报断点续传成功")
-				}
-			}
-			d.body = resp.Body
-			d.host = resp.Request.URL.Host
-			logDAV(d.ctx, runLogEntry{Operation: "下载正文", Source: "云盘节点", Endpoint: d.host, Result: "开始读取", Detail: fmt.Sprintf("起始偏移 %d；HTTP %d", d.pos, resp.StatusCode)})
-			break
-		}
-	}
-	if d.body == nil {
-		return 0, errors.New("下载地址刷新后仍不可访问")
-	}
-	if int64(len(p)) > d.size-d.pos {
-		p = p[:d.size-d.pos]
-	}
-	n, e := d.body.Read(p)
-	d.pos += int64(n)
-	d.readBytes += int64(n)
-	if tr, _ := d.ctx.Value(runTraceKey{}).(*runTrace); tr != nil {
-		tr.downloaded.Add(int64(n))
-	}
-	if e == io.EOF && d.pos < d.size {
-		d.readErr = io.ErrUnexpectedEOF
-		return n, io.ErrUnexpectedEOF
-	}
-	if e != nil && e != io.EOF {
-		d.readErr = e
-	}
-	return n, e
-}
-
-var davDownloadTransport = &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: 35 * time.Second, TLSHandshakeTimeout: 15 * time.Second, IdleConnTimeout: 60 * time.Second, MaxIdleConnsPerHost: 8}
 
 func validDAVURL(raw string) error {
 	u, e := url.Parse(raw)

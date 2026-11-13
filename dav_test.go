@@ -134,7 +134,7 @@ func testDAVService(t *testing.T, writable bool) (*httptest.Server, *fakeDAVDriv
 	fs.transfers = newTransferRuntime(transferOptions{UploadStorageMode: "disk"})
 	salt := []byte("1234567890123456")
 	hash, _ := pbkdf2.Key(sha256.New, "test-password-123", salt, 100000, 32)
-	s := &davService{fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "tester", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash), slots: make(chan struct{}, 8)}
+	s := &davService{fs: fs, handler: &webdav.Handler{Prefix: "/dav", FileSystem: fs, LockSystem: webdav.NewMemLS()}, username: "tester", salt: hex.EncodeToString(salt), passwordHash: hex.EncodeToString(hash)}
 	server := httptest.NewServer(s)
 	t.Cleanup(server.Close)
 	return server, d, fs
@@ -329,10 +329,11 @@ func TestWebDAVUploadLimitsAndNoFalseRange(t *testing.T) {
 	wantDAV(t, s.URL, "PUT", "/联通云盘-1/too-big.txt", strings.Repeat("x", 17), 413, nil)
 	wantDAV(t, s.URL, "PUT", "/联通云盘-1/a.txt", "0123456789", 201, nil)
 	d.ignoreRange = true
-	reader := &davReader{ctx: context.Background(), size: 10, pos: 5, url: func() (string, error) {
-		entries, _ := d.List(context.Background(), "0")
-		return d.server.URL + "/" + entries[0].ID, nil
-	}}
+	entries, _ := d.List(context.Background(), "0")
+	reader := newTransferReader(context.Background(), fs.mounts[0], entries[0], fs.transfers)
+	if _, err := reader.Seek(5, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
 	defer reader.Close()
 	if _, e := reader.Read(make([]byte, 3)); e == nil {
 		t.Fatal("ignored upstream Range must fail")
@@ -413,7 +414,8 @@ func TestWopanCookieParsingAndAccountMatching(t *testing.T) {
 		t.Fatal("unrelated cookies accepted")
 	}
 	cred := map[string]any{"mobile": "+8613800000000", "user_id": "opaque-id"}
-	if !sameWopanAccount(cred, "13800000000") || sameWopanAccount(cred, "13900000000") {
+	account := guiAccount{Provider: "wopan", credentials: cred}
+	if !sameCloudAccount(account, guiAccount{Provider: "wopan", credentials: map[string]any{"user_id": "13800000000"}}) || sameCloudAccount(account, guiAccount{Provider: "wopan", credentials: map[string]any{"user_id": "13900000000"}}) {
 		t.Fatal("account identity guard incorrect")
 	}
 }

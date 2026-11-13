@@ -284,7 +284,6 @@ type davService struct {
 	fs                           *davFS
 	handler                      *webdav.Handler
 	username, salt, passwordHash string
-	slots                        chan struct{}
 	authOnce                     sync.Once
 	auth                         *davAuthenticator
 	requestOnce                  sync.Once
@@ -396,17 +395,6 @@ func (s *davService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(strings.ToLower(r.URL.RawPath), "%2f") || strings.Contains(strings.ToLower(r.URL.RawPath), "%5c") {
 		http.Error(rw, "路径分隔符编码无效", 400)
 		return
-	}
-	if s.slots != nil && (r.Method == "PUT" || r.Method == "GET" || r.Method == "COPY") {
-		select {
-		case s.slots <- struct{}{}:
-			defer func() { <-s.slots }()
-		case <-r.Context().Done():
-			return
-		default:
-			http.Error(rw, "当前传输任务已满，请稍后重试", 503)
-			return
-		}
 	}
 	if s.fs.transfers != nil && (r.Method == "PUT" || r.Method == "GET" || r.Method == "COPY") {
 		kind := "下载"

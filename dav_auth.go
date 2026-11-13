@@ -170,5 +170,3 @@ func (s *davService) authenticationStatus(r *http.Request) (code int) {
 	a.mu.Unlock()
 	return 0
 }
-
-func (s *davService) authorized(r *http.Request) bool { return s.authenticationStatus(r) == 0 }

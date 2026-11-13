@@ -137,7 +137,7 @@ func phoneTestManager(t *testing.T) *quarkManager {
 func TestPhoneRepairPhoneWindowImportsOnlyVerifiedSession(t *testing.T) {
 	manager := phoneTestManager(t)
 	window := &phoneFakeWindow{closed: make(chan struct{}), poll: func(context.Context) (quarkPhoneSnapshot, error) {
-		return quarkPhoneSnapshot{Cookies: map[string]string{"__pus": "private-phone-session"}, MobileReady: true}, nil
+		return quarkPhoneSnapshot{Cookies: map[string]string{"__pus": "private-phone-session"}}, nil
 	}}
 	manager.phoneWindow = func(context.Context, string) (quarkPhoneWindow, error) { return window, nil }
 	if err := manager.Start("phone", ""); err != nil {

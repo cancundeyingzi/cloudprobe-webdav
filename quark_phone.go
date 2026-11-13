@@ -15,8 +15,7 @@ import (
 )
 
 type quarkPhoneSnapshot struct {
-	Cookies     map[string]string
-	MobileReady bool
+	Cookies map[string]string
 }
 type quarkPhoneWindow interface {
 	Poll(context.Context) (quarkPhoneSnapshot, error)
@@ -24,10 +23,11 @@ type quarkPhoneWindow interface {
 }
 
 type quarkPhoneBrowser struct {
-	rpc             *quarkBrowserRPC
-	command         *exec.Cmd
-	exited          <-chan error
-	target, session string
+	rpc          *quarkBrowserRPC
+	command      *exec.Cmd
+	exited       <-chan error
+	cleanup      func() error
+	cleanupError error
 }
 type quarkBrowserRPC struct {
 	connection *websocket.Conn
@@ -158,6 +158,9 @@ func (b *quarkPhoneBrowser) Close() {
 	case <-time.After(2 * time.Second):
 		_ = b.command.Process.Kill()
 	}
+	if b.cleanup != nil {
+		b.cleanupError = b.cleanup()
+	}
 }
 func (m *quarkManager) runPhoneLogin(ctx context.Context, generation uint64, f *quarkLoginFlow) error {
 	open := m.phoneWindow
@@ -168,7 +171,12 @@ func (m *quarkManager) runPhoneLogin(ctx context.Context, generation uint64, f *
 	if err != nil {
 		return err
 	}
-	defer window.Close()
+	defer func() {
+		window.Close()
+		if browser, ok := window.(*quarkPhoneBrowser); ok && browser.cleanupError != nil {
+			m.app.event("登录窗口资料清理未完成，下次启动重试：" + browser.cleanupError.Error())
+		}
+	}()
 	m.app.event("已打开夸克专用官网手机号登录窗口")
 	lastCookie := ""
 	lastAttempt := time.Time{}
@@ -181,9 +189,6 @@ func (m *quarkManager) runPhoneLogin(ctx context.Context, generation uint64, f *
 			return err
 		}
 		stage := "请在专用官网窗口点击手机登录，并完成手机号与验证码登录"
-		if snapshot.MobileReady {
-			stage = "请在专用官网窗口输入手机号、短信验证码并完成登录"
-		}
 		header := quarkCookieHeader(snapshot.Cookies)
 		if header != "" && (header != lastCookie || time.Since(lastAttempt) > 5*time.Second) {
 			lastCookie = header

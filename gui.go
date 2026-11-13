@@ -778,6 +778,12 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	app.runLog = newRuntimeLog(*data, app.redactDAV)
 	app.runLog.snapshotClean = app.snapshotDAVRedactor
 	defer app.runLog.close()
+	if err := pruneGUIResults(*data, time.Now()); err != nil {
+		app.event("旧查询结果清理未完成：" + err.Error())
+	}
+	if err := pruneBrowserProfiles(*data); err != nil {
+		app.event("旧登录窗口资料清理未完成：" + err.Error())
+	}
 	app.restoreCloudAccounts()
 	app.quark = newQuarkManager(app)
 	defer app.quark.Stop()
@@ -789,6 +795,10 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 	defer app.dav.Stop()
 	defer app.webLogin.Stop()
 	server := &http.Server{Handler: app, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	address := "http://" + app.host + "/#" + app.nonce
+	if e := instance.publish(address); e != nil {
+		return 1, e
+	}
 	go func() {
 		b, e := startOriginalBridge(ctx, *sdk, *bridgePath, filepath.Join(*data, "original-sdk"))
 		if e != nil {
@@ -813,10 +823,6 @@ func guiCommand(parent context.Context, args []string, w io.Writer) (int, error)
 		}
 		app.restore(ctx)
 	}()
-	address := "http://" + app.host + "/#" + app.nonce
-	if e := instance.publish(address); e != nil {
-		return 1, e
-	}
 	fmt.Fprintln(w, "GUI_URL="+address)
 	if !*noOpen {
 		if e = openLocalBrowser(address); e != nil {

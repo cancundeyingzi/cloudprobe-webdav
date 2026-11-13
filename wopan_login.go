@@ -70,24 +70,6 @@ func (g *guiApp) acceptWebToken(ctx context.Context, a guiAccount, token string)
 	}
 	return g.acceptCloudAccount(ctx, guiAccount{Provider: "wopan", Name: "联通云盘 · " + maskAccount(user.UserId), Root: "0", credentials: map[string]any{"user_id": user.UserId, "wopan_web_token": token, "wopan_web_managed": "1"}})
 }
-func sameWopanAccount(cred map[string]any, actual string) bool {
-	normal := func(s string) string {
-		s = strings.TrimSpace(s)
-		s = strings.TrimPrefix(s, "+86")
-		if len(s) == 13 && strings.HasPrefix(s, "86") {
-			s = s[2:]
-		}
-		return s
-	}
-	actual = normal(actual)
-	for _, key := range []string{"user_id", "mobile", "username"} {
-		v := normal(valueString(cred[key]))
-		if v != "" && v == actual {
-			return true
-		}
-	}
-	return false
-}
 
 // The website stores JSON.stringify(token) inside a URL-encoded cookie.
 // Decode the URL layer first, then the JSON string; '+' is part of a token.

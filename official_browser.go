@@ -9,9 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,10 +24,16 @@ func openOfficialBrowser(ctx context.Context, data, provider, address string) (*
 	if err != nil {
 		return nil, err
 	}
-	profile := filepath.Join(data, "official-"+provider+"-browser", "login-"+randomKey()[:16])
-	if err = os.MkdirAll(profile, 0700); err != nil {
+	profile, cleanup, err := newBrowserProfile(data, provider)
+	if err != nil {
 		return nil, err
 	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			_ = cleanup()
+		}
+	}()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -55,7 +59,8 @@ func openOfficialBrowser(ctx context.Context, data, provider, address string) (*
 			cfg.Dialer = &net.Dialer{Timeout: time.Second}
 			connection, e := websocket.DialConfig(cfg)
 			if e == nil {
-				return &quarkPhoneBrowser{rpc: newQuarkBrowserRPC(ctx, connection), command: command, exited: exited}, nil
+				transferred = true
+				return &quarkPhoneBrowser{rpc: newQuarkBrowserRPC(ctx, connection), command: command, exited: exited, cleanup: cleanup}, nil
 			}
 		}
 		if e = davWait(ready, 100*time.Millisecond); e != nil {
