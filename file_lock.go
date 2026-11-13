@@ -10,8 +10,6 @@ import (
 	"sync"
 )
 
-var keyLeaseCleanup sync.Map
-
 func lockFileWait(ctx context.Context, path string) (*os.File, error) {
 	for attempt := 0; attempt < 50; attempt++ {
 		file, err := tryLockFile(path)
@@ -48,21 +46,17 @@ func acquireKeyLease(ctx context.Context, dir, key string) (*keyLease, error) {
 	if info, statErr := file.Stat(); statErr != nil {
 		_ = file.Close()
 		return nil, statErr
-	} else if info.Size() != 0 {
+	} else if !info.Mode().IsRegular() || info.Size() != 0 {
 		_ = file.Close()
 		return nil, errors.New("任务锁文件不是空文件，已保留")
 	}
-	refs, _ := keyLeaseCleanup.LoadOrStore(lockKeyPath(dir, key), new(int))
-	count := refs.(*int)
-	*count++
-	return &keyLease{file: file, path: lockKeyPath(dir, key), dir: dir, refs: count}, nil
+	return &keyLease{file: file, path: lockKeyPath(dir, key), dir: dir}, nil
 }
 
 type keyLease struct {
 	file *os.File
 	path string
 	dir  string
-	refs *int
 	once sync.Once
 }
 
@@ -74,12 +68,8 @@ func (lease *keyLease) Close() error {
 		if lockErr != nil {
 			err = lockErr
 		} else {
-			*lease.refs--
-			if *lease.refs == 0 {
-				keyLeaseCleanup.Delete(lease.path)
-				if removeErr := os.Remove(lease.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-					err = removeErr
-				}
+			if removeErr := os.Remove(lease.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = removeErr
 			}
 			_ = catalog.Close()
 		}
@@ -91,6 +81,11 @@ func (lease *keyLease) Close() error {
 }
 
 func cleanupLegacyLockStripes(dir string) error {
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
 	catalog, err := lockFileWait(context.Background(), filepath.Join(dir, "catalog-lease"))
 	if err != nil {
 		return err
@@ -102,20 +97,28 @@ func cleanupLegacyLockStripes(dir string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "lease-") {
+		if !entry.Type().IsRegular() {
 			continue
 		}
 		key := strings.TrimPrefix(name, "lease-")
-		if len(key) != 2 {
+		legacy := strings.HasPrefix(name, "lease-") && len(key) == 2
+		stale := strings.HasPrefix(name, "lock-") && validOwnerID(strings.TrimPrefix(name, "lock-"))
+		if !legacy && !stale {
 			continue
 		}
-		if _, err = hex.DecodeString(key); err != nil {
-			continue
+		if legacy {
+			if _, err = hex.DecodeString(key); err != nil {
+				continue
+			}
 		}
 		path := filepath.Join(dir, name)
 		file, lockErr := tryLockFile(path)
-		if lockErr == nil {
-			_ = file.Close()
+		if lockErr != nil {
+			continue
+		}
+		info, statErr := file.Stat()
+		_ = file.Close()
+		if statErr == nil && info.Size() == 0 {
 			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 				return removeErr
 			}
