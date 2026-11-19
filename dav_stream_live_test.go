@@ -58,7 +58,6 @@ func TestLiveMemoryStreamingAndAggregateRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.folder = ""
 	drive := newWopanDAVDrive(client, account.credentials, "0", func(access, refresh string) error { return g.saveDAVCredential(account, access, refresh) })
 	trace := newRunTrace(ctx, g.runLog, "纯内存实测", "/CloudProbe-owned-test")
 	if err = drive.probe(trace); err != nil {

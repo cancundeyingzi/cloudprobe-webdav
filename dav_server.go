@@ -880,12 +880,11 @@ func (g *guiApp) saveDAVWebCredential(a guiAccount, token string) error {
 
 func (d *davManager) prepareMount(ctx context.Context, sel davMountInput, a guiAccount, cfg davSavedConfig, transfers *transferRuntime) (*davMount, davSavedMount, error) {
 	g := d.app
+	// WebDAV uses operation summaries and does not save GUI result files.
 	cl, e := g.accountClient(sel.Account)
 	if e != nil {
 		return nil, davSavedMount{}, e
 	}
-	// WebDAV logs contain operation summaries, not raw directory responses.
-	cl.folder = ""
 	m := &davMount{UploadStorageMode: sel.UploadStorageMode, Alias: sel.Alias, Root: sel.Root, Provider: a.Provider, Writable: sel.Writable, Identity: davIdentity(a), WriteStatus: "只读挂载", health: &routeHealth{}}
 	backupKey := m.Identity + ":" + m.Alias
 	backupConfig, backupErr := g.openListConfig(backupKey, sel.OpenList, m.Identity+"\x00"+m.Root)

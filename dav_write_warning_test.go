@@ -102,6 +102,9 @@ func TestDAVStartsWithReadableCloudWhenWriteProbeFails(t *testing.T) {
 			if got := wantDAV(t, base, "GET", "/盘/old.txt", "", 206, map[string]string{"Range": "bytes=3-7"}); string(got) != body[3:8] {
 				t.Fatal("range changed")
 			}
+			if _, err := os.Stat(filepath.Join(d.app.data, "results")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("mounting and reading WebDAV created a GUI results directory: %v", err)
+			}
 			warning := d.mounts[0].writeWarningSnapshot()
 			if mode == "healthy" || mode == "readonly" {
 				if warning != nil {

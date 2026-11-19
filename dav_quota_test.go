@@ -431,7 +431,6 @@ func TestLiveWebDAVQuotaReadOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal("初始化账号客户端失败")
 		}
-		cl.folder = ""
 		var drive davDrive
 		if a.Provider == "wopan" {
 			wd := newWopanDAVDrive(cl, a.credentials, "0", nil)

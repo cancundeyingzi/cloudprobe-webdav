@@ -351,24 +351,27 @@ func (g *guiApp) accountClient(key string) (*Client, error) {
 	identity := g.identity
 	logged := g.logged
 	g.mu.Unlock()
-	if ok && a.Provider == "quark" {
-		folder, err := runFolder(filepath.Join(g.data, "results"))
-		if err != nil {
-			return nil, err
-		}
-		c := defaultConfig("mobile")
-		c.Provider = "quark"
-		return &Client{cfg: c, folder: folder, redact: newRedactor(Config{})}, nil
-	}
 	if !ok {
 		return nil, errors.New("请选择已登录的云盘账号")
 	}
-	folder, e := runFolder(filepath.Join(g.data, "results"))
-	if e != nil {
-		return nil, e
+	if a.Provider == "quark" {
+		c := defaultConfig("mobile")
+		c.Provider = "quark"
+		return &Client{cfg: c, redact: newRedactor(Config{})}, nil
 	}
-	return g.cloudAccountClient(a, folder, identity, b, logged)
+	return g.cloudAccountClient(a, "", identity, b, logged)
+}
 
+func (g *guiApp) resultAccountClient(key string) (*Client, error) {
+	cl, err := g.accountClient(key)
+	if err != nil {
+		return nil, err
+	}
+	cl.folder, err = runFolder(filepath.Join(g.data, "results"))
+	if err != nil {
+		return nil, err
+	}
+	return cl, nil
 }
 func respondJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -567,7 +570,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.fail(w, errors.New("请输入目录 ID"))
 			return
 		}
-		cl, e := g.accountClient(input.Account)
+		cl, e := g.resultAccountClient(input.Account)
 		if e != nil {
 			g.fail(w, e)
 			return
@@ -663,7 +666,7 @@ func (g *guiApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.event(fmt.Sprintf("目录查询完成，返回 %d 条记录", len(report.Items)))
 		respondJSON(w, 200, map[string]any{"ok": true, "report": report, "snapshot": snapshotID})
 	case "/api/fetch":
-		cl, e := g.accountClient(input.Account)
+		cl, e := g.resultAccountClient(input.Account)
 		if e != nil {
 			g.fail(w, e)
 			return
